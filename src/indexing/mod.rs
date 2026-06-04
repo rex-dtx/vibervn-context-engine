@@ -31,6 +31,14 @@ pub enum IndexState {
     Error,
 }
 
+/// Per-repo status snapshot returned by `GET /api/index-status`.
+///
+/// Dual-meaning fields (state-gated contract):
+/// - `state == Indexing`: `total_files` = workset size for this run (denominator);
+///   `indexed_files` = files whose chunks have been embedded so far (numerator).
+///   Progress % = indexed_files / total_files (guard against total_files == 0).
+/// - `state == Idle` / `Error`: `indexed_files` = files in the index;
+///   `total_files` = total files in the repo on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoStatus {
     pub state: IndexState,
@@ -52,6 +60,34 @@ impl Default for RepoStatus {
     }
 }
 
+// ─── ProgressHandle ───────────────────────────────────────────────────────
+
+/// Lightweight handle passed into `IndexPipeline::run` so the pipeline can
+/// write live progress into the shared status map without knowing the full engine.
+#[derive(Clone)]
+pub struct ProgressHandle {
+    statuses: Arc<RwLock<HashMap<String, RepoStatus>>>,
+    repo: String,
+}
+
+impl ProgressHandle {
+    /// Set the denominator once the parsed file set is known.
+    pub async fn set_run_total(&self, total: u64) {
+        let mut map = self.statuses.write().await;
+        let s = map.entry(self.repo.clone()).or_default();
+        s.total_files = total;
+    }
+
+    /// Advance the numerator. Monotonic — never decreases.
+    pub async fn set_processed(&self, processed: u64) {
+        let mut map = self.statuses.write().await;
+        let s = map.entry(self.repo.clone()).or_default();
+        if processed > s.indexed_files {
+            s.indexed_files = processed;
+        }
+    }
+}
+
 // ─── IndexEngine ──────────────────────────────────────────────────────────
 
 /// Central orchestrator for all indexing operations.
@@ -59,7 +95,8 @@ impl Default for RepoStatus {
 pub struct IndexEngine {
     pub home_dir: PathBuf,
     /// Per-repo status map, keyed by repo path string.
-    pub statuses: RwLock<HashMap<String, RepoStatus>>,
+    /// Wrapped in Arc so `ProgressHandle` can hold a reference without borrowing self.
+    pub statuses: Arc<RwLock<HashMap<String, RepoStatus>>>,
     /// Serialises concurrent pipeline runs per repo.
     repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Channel sender for triggering index runs (manual or watcher-driven).
@@ -103,7 +140,7 @@ impl IndexEngine {
 
         let engine = Arc::new(IndexEngine {
             home_dir: home_dir.clone(),
-            statuses: RwLock::new(HashMap::new()),
+            statuses: Arc::new(RwLock::new(HashMap::new())),
             repo_locks: Mutex::new(HashMap::new()),
             trigger_tx: trigger_tx.clone(),
             vector_index,
@@ -204,12 +241,15 @@ async fn run_consumer(
         let lock = engine_ref.get_repo_lock(&repo).await;
         let _guard = lock.lock().await;
 
-        // Mark indexing.
+        // Mark indexing. Reset progress counters so the UI shows the
+        // indeterminate pulse (total_files == 0) until the pipeline reports a total.
         {
             let mut statuses = engine_ref.statuses.write().await;
             let status = statuses.entry(repo.clone()).or_default();
             status.state = IndexState::Indexing;
             status.error = None;
+            status.indexed_files = 0;
+            status.total_files = 0;
         }
 
         // Build embedding client — skip if no keys configured.
@@ -233,13 +273,19 @@ async fn run_consumer(
             }
         };
 
+        // Build a progress handle that lets the pipeline write live counts.
+        let progress = ProgressHandle {
+            statuses: Arc::clone(&engine_ref.statuses),
+            repo: repo.clone(),
+        };
+
         let pipeline = IndexPipeline::new(
             engine_ref.home_dir.clone(),
             repo.clone(),
             voyage_client,
         );
 
-        match pipeline.run(trigger.changes, Some(&engine_ref.vector_index)).await {
+        match pipeline.run(trigger.changes, Some(&engine_ref.vector_index), Some(progress)).await {
             Ok(stats) => {
                 info!(repo = %repo, indexed = stats.indexed_files, "indexing complete");
                 let mut statuses = engine_ref.statuses.write().await;

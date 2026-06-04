@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::embedding::InputType;
 
 const VOYAGE_ENDPOINT: &str = "https://api.voyageai.com/v1/embeddings";
-const MAX_BATCH_SIZE: usize = 128;
+pub const MAX_BATCH_SIZE: usize = 128;
 
 // ─── Request / response shapes ────────────────────────────────────────────
 
@@ -131,7 +131,9 @@ impl VoyageClient {
         Ok(all_embeddings)
     }
 
-    async fn embed_batch(&self, texts: &[String], input_type: InputType) -> Result<Vec<Vec<f32>>> {
+    /// Embed a batch of up to `MAX_BATCH_SIZE` texts. Public so the pipeline can
+    /// drive batching manually and report per-batch progress between awaits.
+    pub async fn embed_batch(&self, texts: &[String], input_type: InputType) -> Result<Vec<Vec<f32>>> {
         let n_keys = self.inner.api_keys.len();
         let start_cursor = self.inner.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
 

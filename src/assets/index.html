@@ -269,11 +269,17 @@ async function pollIndexStatus() {
     indexStatuses = newStatuses;
     updateRepoIndexUI();
   } catch (_) { /* ignore network errors in polling */ }
+  scheduleNextPoll();
+}
+
+function scheduleNextPoll() {
+  clearTimeout(indexPollTimer);
+  const anyIndexing = Object.values(indexStatuses).some(s => s.state === 'indexing');
+  indexPollTimer = setTimeout(pollIndexStatus, anyIndexing ? 1000 : 3000);
 }
 
 function startIndexPolling() {
-  clearInterval(indexPollTimer);
-  indexPollTimer = setInterval(pollIndexStatus, 3000);
+  clearTimeout(indexPollTimer);
   pollIndexStatus();
 }
 
@@ -290,7 +296,18 @@ function updateRepoIndexUI() {
       return;
     }
     if (s.state === 'indexing') {
-      statusEl.innerHTML = '<span class="animate-pulse text-blue-500 dark:text-wiki-link">Indexing…</span>';
+      if (s.total_files > 0) {
+        const pct = Math.min(100, Math.round((s.indexed_files / s.total_files) * 100));
+        statusEl.innerHTML =
+          '<span class="inline-flex items-center gap-1.5">' +
+            '<span class="inline-block w-20 h-1.5 bg-gray-200 dark:bg-wiki-border rounded overflow-hidden align-middle">' +
+              '<span class="block h-full bg-blue-600 dark:bg-wiki-border-active rounded transition-[width] duration-200" style="width:' + pct + '%"></span>' +
+            '</span>' +
+            '<span class="text-xs text-gray-400 dark:text-wiki-text-muted">' + s.indexed_files + ' / ' + s.total_files + ' (' + pct + '%)</span>' +
+          '</span>';
+      } else {
+        statusEl.innerHTML = '<span class="animate-pulse text-blue-500 dark:text-wiki-link">Indexing…</span>';
+      }
       btnEl.disabled = true;
     } else if (s.state === 'error') {
       statusEl.innerHTML = '<span class="text-red-500 dark:text-red-400" title="' + escHtml(s.error || '') + '">Error</span>';

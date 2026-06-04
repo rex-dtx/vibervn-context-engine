@@ -7,7 +7,8 @@ use surrealdb::engine::local::Db;
 use tracing::{debug, info, warn};
 
 use crate::embedding::InputType;
-use crate::embedding::voyage::VoyageClient;
+use crate::embedding::voyage::{MAX_BATCH_SIZE, VoyageClient};
+use crate::indexing::ProgressHandle;
 use crate::indexing::tracker::{ChangeKind, FileChange, stat_file};
 use crate::indexing::walker::walk_repo;
 use crate::parsing::parse_file;
@@ -37,10 +38,12 @@ impl IndexPipeline {
     /// Run the pipeline.
     /// - `changes = None` → incremental scan (detect changes from mtime).
     /// - `changes = Some(list)` → process only the given file changes.
+    /// - `progress` → optional handle for reporting live progress to the status map.
     pub async fn run(
         &self,
         changes: Option<Vec<FileChange>>,
         vector_index: Option<&tokio::sync::RwLock<VectorIndex>>,
+        progress: Option<ProgressHandle>,
     ) -> Result<IndexPipelineStats> {
         let db = store::open_db(&self.home_dir, &self.repo).await?;
 
@@ -52,7 +55,7 @@ impl IndexPipeline {
 
         if is_first_run {
             info!(repo = %self.repo, "first run — full rebuild");
-            let new_vectors = self.full_rebuild(&db).await?;
+            let new_vectors = self.full_rebuild(&db, progress.as_ref()).await?;
             if let Some(vi) = vector_index {
                 let mut guard = vi.write().await;
                 guard.clear();
@@ -83,7 +86,7 @@ impl IndexPipeline {
         }
 
         info!(repo = %self.repo, changes = file_changes.len(), "incremental index");
-        let (removed_files, new_vectors) = self.incremental_run(&db, file_changes).await?;
+        let (removed_files, new_vectors) = self.incremental_run(&db, file_changes, progress.as_ref()).await?;
 
         if let Some(vi) = vector_index {
             let mut guard = vi.write().await;
@@ -100,7 +103,7 @@ impl IndexPipeline {
     // ─── Full rebuild ─────────────────────────────────────────────────────
 
     /// Returns (chunk_id, embedding) pairs for VectorIndex insertion.
-    async fn full_rebuild(&self, db: &Surreal<Db>) -> Result<Vec<(ChunkId, Vec<f32>)>> {
+    async fn full_rebuild(&self, db: &Surreal<Db>, progress: Option<&ProgressHandle>) -> Result<Vec<(ChunkId, Vec<f32>)>> {
         // 1. Walk all files.
         let all_files = walk_repo(&self.repo);
         info!(repo = %self.repo, file_count = all_files.len(), "walking repo for full rebuild");
@@ -123,7 +126,7 @@ impl IndexPipeline {
         let symbol_index = build_symbol_index(&all_symbols);
 
         // 5. Embed all chunks (outside transaction — network I/O).
-        let embeddings = self.embed_all_chunks(&all_chunks_by_file).await?;
+        let embeddings = self.embed_all_chunks(&all_chunks_by_file, progress).await?;
 
         // 6. Resolve edges.
         let resolved_edges = resolve_edges(&all_edges, &symbol_index);
@@ -195,6 +198,7 @@ impl IndexPipeline {
         &self,
         db: &Surreal<Db>,
         changes: Vec<FileChange>,
+        progress: Option<&ProgressHandle>,
     ) -> Result<(Vec<String>, Vec<(ChunkId, Vec<f32>)>)> {
         // Separate added/modified from deleted.
         let to_process: Vec<String> = changes
@@ -236,7 +240,7 @@ impl IndexPipeline {
         }
 
         // Embed chunks outside transaction.
-        let embeddings = self.embed_all_chunks(&all_chunks_by_file).await?;
+        let embeddings = self.embed_all_chunks(&all_chunks_by_file, progress).await?;
 
         // Resolve edges.
         let resolved_edges = resolve_edges(&all_edges, &symbol_index);
@@ -306,9 +310,17 @@ impl IndexPipeline {
 
     // ─── Embedding helper ─────────────────────────────────────────────────
 
+    /// Embed all chunks, reporting per-batch progress via `progress`.
+    ///
+    /// Progress advances at embedding batch boundaries (every `MAX_BATCH_SIZE`
+    /// chunks). The numerator counts files whose last chunk has been embedded,
+    /// using a per-file cumulative prefix over the flattened chunk list so the
+    /// denominator and numerator always use the same file set and the bar
+    /// reaches exactly 100%.
     async fn embed_all_chunks(
         &self,
         chunks_by_file: &[(String, Vec<crate::parsing::chunker::Chunk>)],
+        progress: Option<&ProgressHandle>,
     ) -> Result<Vec<Vec<f32>>> {
         let texts: Vec<String> = chunks_by_file
             .iter()
@@ -316,16 +328,59 @@ impl IndexPipeline {
             .collect();
 
         if texts.is_empty() {
+            // Nothing to embed — report total immediately so the bar completes.
+            if let Some(ph) = progress {
+                let total = chunks_by_file.len() as u64;
+                ph.set_run_total(total).await;
+                ph.set_processed(total).await;
+            }
             return Ok(vec![]);
+        }
+
+        // Precompute cumulative chunk-end index for each file so we can map
+        // "chunks done so far" → "files fully embedded".
+        // cumulative[i] = index of the last chunk of file i in the flat list (exclusive end).
+        let mut cumulative: Vec<usize> = Vec::with_capacity(chunks_by_file.len());
+        let mut running = 0usize;
+        for (_, chunks) in chunks_by_file {
+            running += chunks.len();
+            cumulative.push(running);
+        }
+        let total_files = chunks_by_file.len() as u64;
+
+        // Report the denominator once the file set is known, before any I/O.
+        if let Some(ph) = progress {
+            ph.set_run_total(total_files).await;
         }
 
         match &self.voyage {
             Some(client) => {
                 info!(count = texts.len(), "embedding chunks");
-                client.embed(&texts, InputType::Document).await
+                let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+                let mut done: usize = 0;
+
+                for batch in texts.chunks(MAX_BATCH_SIZE) {
+                    let batch_vec: Vec<String> = batch.to_vec();
+                    let embeddings = client.embed_batch(&batch_vec, InputType::Document).await?;
+                    done += embeddings.len();
+                    all_embeddings.extend(embeddings);
+
+                    // Count how many files are fully embedded (all their chunks done).
+                    if let Some(ph) = progress {
+                        // Binary-search for the rightmost file whose cumulative end <= done.
+                        let completed_files = cumulative.partition_point(|&end| end <= done) as u64;
+                        ph.set_processed(completed_files).await;
+                    }
+                }
+
+                Ok(all_embeddings)
             }
             None => {
                 warn!("no embedding client configured; storing empty embeddings");
+                // No network I/O — mark everything complete immediately.
+                if let Some(ph) = progress {
+                    ph.set_processed(total_files).await;
+                }
                 Ok(vec![vec![]; texts.len()])
             }
         }
