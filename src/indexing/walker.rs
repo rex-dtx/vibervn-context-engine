@@ -66,13 +66,12 @@ pub fn walk_repo(repo_path: &str) -> Vec<String> {
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    if fname == "dockerfile"
+                    if (fname == "dockerfile"
                         || fname == "makefile"
-                        || fname == "justfile"
+                        || fname == "justfile")
+                        && let Some(s) = path.to_str()
                     {
-                        if let Some(s) = path.to_str() {
-                            files.push(s.to_string());
-                        }
+                        files.push(s.to_string());
                     }
                 }
             }

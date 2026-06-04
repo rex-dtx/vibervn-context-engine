@@ -181,6 +181,7 @@ pub async fn run_query(
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 /// Fetch stored chunk content and symbol_ref from whichever DB contains the file.
+#[allow(clippy::result_large_err)]
 async fn fetch_chunk_content(
     db_map: &HashMap<String, Surreal<Db>>,
     file: &str,

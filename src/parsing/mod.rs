@@ -146,6 +146,7 @@ fn node_line_end(node: &Node) -> u32 {
     node.end_position().row as u32 + 1
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_symbol(
     file: &str,
     name: &str,
@@ -551,16 +552,16 @@ fn extract_go_node(
         "type_declaration" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.kind() == "type_spec" {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        let name = node_text(&name_node, source).to_string();
-                        let sym = make_symbol(
-                            file, &name, scope.to_vec(), SymbolKind::Struct,
-                            node_line_start(&child), node_line_end(&child),
-                            None, parent_fqn.map(|s| s.to_string()),
-                        );
-                        symbols.push(sym);
-                    }
+                if child.kind() == "type_spec"
+                    && let Some(name_node) = child.child_by_field_name("name")
+                {
+                    let name = node_text(&name_node, source).to_string();
+                    let sym = make_symbol(
+                        file, &name, scope.to_vec(), SymbolKind::Struct,
+                        node_line_start(&child), node_line_end(&child),
+                        None, parent_fqn.map(|s| s.to_string()),
+                    );
+                    symbols.push(sym);
                 }
             }
         }

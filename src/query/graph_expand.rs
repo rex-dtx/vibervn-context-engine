@@ -78,7 +78,7 @@ pub async fn graph_expand(
         };
 
         let overlapping = match query_overlapping_symbols(
-            &db,
+            db,
             &base_chunk.file,
             base_chunk.line_start,
             base_chunk.line_end,
@@ -113,14 +113,14 @@ pub async fn graph_expand(
             // Expand callers.
             let caller_score = score * CALLER_SCORE_FACTOR;
             if caller_score >= SCORE_FLOOR {
-                let callers = query_callers(&db, &fqn).await.unwrap_or_default();
+                let callers = query_callers(db, &fqn).await.unwrap_or_default();
                 for caller_fqn in callers {
                     if global_seen.contains(&caller_fqn) {
                         continue;
                     }
                     global_seen.insert(caller_fqn.clone());
                     if let Some(chunk) =
-                        fetch_chunk_for_fqn(&db, &caller_fqn, caller_score, &base_keys).await
+                        fetch_chunk_for_fqn(db, &caller_fqn, caller_score, &base_keys).await
                     {
                         if all_expanded.len() < MAX_BONUS_CHUNKS {
                             all_expanded.push(chunk);
@@ -133,14 +133,14 @@ pub async fn graph_expand(
             // Expand callees.
             let callee_score = score * CALLEE_SCORE_FACTOR;
             if callee_score >= SCORE_FLOOR {
-                let callees = query_callees(&db, &fqn).await.unwrap_or_default();
+                let callees = query_callees(db, &fqn).await.unwrap_or_default();
                 for callee_fqn in callees {
                     if global_seen.contains(&callee_fqn) {
                         continue;
                     }
                     global_seen.insert(callee_fqn.clone());
                     if let Some(chunk) =
-                        fetch_chunk_for_fqn(&db, &callee_fqn, callee_score, &base_keys).await
+                        fetch_chunk_for_fqn(db, &callee_fqn, callee_score, &base_keys).await
                     {
                         if all_expanded.len() < MAX_BONUS_CHUNKS {
                             all_expanded.push(chunk);

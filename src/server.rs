@@ -92,6 +92,7 @@ pub fn build_router(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::result_large_err)]
 fn decode_repo_id(repo_id: &str) -> Result<String, Response> {
     URL_SAFE_NO_PAD
         .decode(repo_id)
