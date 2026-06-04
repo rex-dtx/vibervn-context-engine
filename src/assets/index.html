@@ -1,63 +1,82 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Context Engine Settings</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+    // Apply saved preference before paint
+    if (localStorage.getItem('theme') === 'light') {
+      document.documentElement.classList.remove('dark');
+    }
+  </script>
 </head>
-<body class="bg-white text-gray-900 min-h-screen">
+<body class="bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen transition-colors duration-200">
 
 <div class="max-w-2xl mx-auto px-4 py-10">
-  <h1 class="text-2xl font-semibold mb-1">Context Engine</h1>
-  <p class="text-gray-500 text-sm mb-8">Settings</p>
+  <div class="flex items-center justify-between mb-1">
+    <h1 class="text-2xl font-semibold">Context Engine</h1>
+    <button id="btn-theme" aria-label="Toggle dark mode"
+            class="p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800
+                   focus:outline-none focus:ring-2 focus:ring-gray-400 transition-colors">
+      <svg id="icon-sun" class="w-5 h-5 hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="5"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+      </svg>
+      <svg id="icon-moon" class="w-5 h-5 hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+      </svg>
+    </button>
+  </div>
+  <p class="text-gray-500 dark:text-gray-400 text-sm mb-8">Settings</p>
 
   <!-- Version-too-new banner (hidden by default) -->
-  <div id="banner-version" class="hidden mb-6 p-4 border border-red-300 bg-red-50 rounded-lg text-red-800 text-sm">
+  <div id="banner-version" class="hidden mb-6 p-4 border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-800 dark:text-red-300 text-sm">
     This config was written by a newer version of Context Engine. Upgrade the binary or
     replace <code class="font-mono">settings.json</code> with an older backup.
   </div>
 
   <!-- Generic error banner -->
-  <div id="banner-error" class="hidden mb-6 p-4 border border-orange-300 bg-orange-50 rounded-lg text-sm">
+  <div id="banner-error" class="hidden mb-6 p-4 border border-orange-300 dark:border-orange-700 bg-orange-50 dark:bg-orange-900/30 rounded-lg text-sm">
     <div class="flex items-center justify-between">
-      <span id="banner-error-msg" class="text-orange-800"></span>
-      <button id="btn-retry" class="ml-4 px-3 py-1 text-xs rounded border border-orange-400 text-orange-700
-             hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-orange-400">
+      <span id="banner-error-msg" class="text-orange-800 dark:text-orange-300"></span>
+      <button id="btn-retry" class="ml-4 px-3 py-1 text-xs rounded border border-orange-400 dark:border-orange-600 text-orange-700 dark:text-orange-300
+             hover:bg-orange-100 dark:hover:bg-orange-800 focus:outline-none focus:ring-2 focus:ring-orange-400">
         Retry
       </button>
     </div>
   </div>
 
   <!-- "Saved" toast -->
-  <div id="toast-saved" class="hidden fixed bottom-6 right-6 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg shadow-lg
+  <div id="toast-saved" class="hidden fixed bottom-6 right-6 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 text-sm px-4 py-2 rounded-lg shadow-lg
        transition-opacity duration-300 opacity-0">
     Saved
   </div>
 
   <!-- Loading skeleton -->
   <div id="skeleton" class="space-y-3">
-    <div class="h-8 bg-gray-100 rounded w-64 animate-pulse"></div>
-    <div class="h-32 bg-gray-100 rounded animate-pulse"></div>
+    <div class="h-8 bg-gray-100 dark:bg-gray-800 rounded w-64 animate-pulse"></div>
+    <div class="h-32 bg-gray-100 dark:bg-gray-800 rounded animate-pulse"></div>
   </div>
 
   <!-- Main content (hidden until loaded) -->
   <div id="main-content" class="hidden">
     <!-- Tab bar -->
-    <div role="tablist" class="flex border-b border-gray-200 mb-6 gap-1">
+    <div role="tablist" class="flex border-b border-gray-200 dark:border-gray-700 mb-6 gap-1">
       <button role="tab" id="tab-repos" aria-selected="true" aria-controls="panel-repos"
-              class="tab-btn px-4 py-2 text-sm font-medium rounded-t border-b-2 border-gray-900 text-gray-900
+              class="tab-btn px-4 py-2 text-sm font-medium rounded-t border-b-2 border-gray-900 dark:border-gray-100 text-gray-900 dark:text-gray-100
                      focus:outline-none focus:ring-2 focus:ring-gray-400">
         Repositories
       </button>
       <button role="tab" id="tab-embedding" aria-selected="false" aria-controls="panel-embedding"
-              class="tab-btn px-4 py-2 text-sm font-medium rounded-t border-b-2 border-transparent text-gray-500
-                     hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-400">
+              class="tab-btn px-4 py-2 text-sm font-medium rounded-t border-b-2 border-transparent text-gray-500 dark:text-gray-400
+                     hover:text-gray-900 dark:hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-gray-400">
         Embedding Providers
       </button>
       <button role="tab" id="tab-llm" aria-selected="false" aria-controls="panel-llm"
-              class="tab-btn px-4 py-2 text-sm font-medium rounded-t border-b-2 border-transparent text-gray-500
-                     hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-400">
+              class="tab-btn px-4 py-2 text-sm font-medium rounded-t border-b-2 border-transparent text-gray-500 dark:text-gray-400
+                     hover:text-gray-900 dark:hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-gray-400">
         LLM Keys
       </button>
     </div>
@@ -65,20 +84,20 @@
     <!-- Tab: Repositories -->
     <div role="tabpanel" id="panel-repos">
       <div id="repos-list" class="space-y-2 mb-4"></div>
-      <div id="repos-empty" class="hidden text-gray-400 text-sm mb-4">
+      <div id="repos-empty" class="hidden text-gray-400 dark:text-gray-500 text-sm mb-4">
         No repositories configured. Add an absolute path below.
       </div>
       <form id="form-add-repo" class="flex gap-2" onsubmit="return false;">
         <input id="input-repo" type="text" placeholder="/absolute/path/to/repo"
-               class="flex-1 border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none
-                      focus:ring-2 focus:ring-gray-400" />
+               class="flex-1 border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-gray-400" />
         <button type="submit" id="btn-add-repo"
-                class="px-4 py-2 bg-gray-900 text-white text-sm rounded hover:bg-gray-700
-                       focus:outline-none focus:ring-2 focus:ring-gray-400">
+                class="px-4 py-2 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 text-sm rounded
+                       hover:bg-gray-700 dark:hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-400">
           Add
         </button>
       </form>
-      <p id="repo-warning" class="hidden text-amber-600 text-xs mt-1">
+      <p id="repo-warning" class="hidden text-amber-600 dark:text-amber-400 text-xs mt-1">
         Warning: path does not look absolute. It will still be saved.
       </p>
     </div>
@@ -86,32 +105,32 @@
     <!-- Tab: Embedding Providers -->
     <div role="tabpanel" id="panel-embedding" class="hidden">
       <div class="mb-4">
-        <label class="block text-xs font-medium text-gray-500 mb-1">Provider</label>
+        <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Provider</label>
         <select id="embedding-provider"
-                class="border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none
-                       focus:ring-2 focus:ring-gray-400">
+                class="border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-gray-400">
           <option value="voyage">Voyage AI</option>
         </select>
       </div>
       <div class="mb-4">
-        <label class="block text-xs font-medium text-gray-500 mb-1" for="embedding-model">
+        <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1" for="embedding-model">
           Embedding model
         </label>
         <input id="embedding-model" type="text" placeholder="e.g. voyage-4-lite"
-               class="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none
-                      focus:ring-2 focus:ring-gray-400" />
+               class="w-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-gray-400" />
       </div>
       <div class="mb-2">
-        <label class="block text-xs font-medium text-gray-500 mb-1">API keys</label>
+        <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">API keys</label>
         <div id="embedding-keys-list" class="space-y-2 mb-2"></div>
       </div>
       <form id="form-add-embedding-key" class="flex gap-2" onsubmit="return false;">
         <input id="input-embedding-key" type="text" placeholder="Paste API key"
-               class="flex-1 border border-gray-200 rounded px-3 py-2 text-sm font-mono
+               class="flex-1 border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 text-sm font-mono
                       focus:outline-none focus:ring-2 focus:ring-gray-400" />
         <button type="submit"
-                class="px-4 py-2 bg-gray-900 text-white text-sm rounded hover:bg-gray-700
-                       focus:outline-none focus:ring-2 focus:ring-gray-400">
+                class="px-4 py-2 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 text-sm rounded
+                       hover:bg-gray-700 dark:hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-400">
           Add
         </button>
       </form>
@@ -120,32 +139,32 @@
     <!-- Tab: LLM Keys -->
     <div role="tabpanel" id="panel-llm" class="hidden">
       <div class="mb-4">
-        <label class="block text-xs font-medium text-gray-500 mb-1">Provider</label>
+        <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Provider</label>
         <select id="llm-provider"
-                class="border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none
-                       focus:ring-2 focus:ring-gray-400">
+                class="border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-gray-400">
           <option value="google">Google</option>
         </select>
       </div>
       <div class="mb-4">
-        <label class="block text-xs font-medium text-gray-500 mb-1" for="llm-rerank-model">
+        <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1" for="llm-rerank-model">
           Rerank model
         </label>
         <input id="llm-rerank-model" type="text" placeholder="e.g. gemini-3.1-flash-lite"
-               class="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none
-                      focus:ring-2 focus:ring-gray-400" />
+               class="w-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-gray-400" />
       </div>
       <div class="mb-2">
-        <label class="block text-xs font-medium text-gray-500 mb-1">API keys</label>
+        <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">API keys</label>
         <div id="llm-keys-list" class="space-y-2 mb-2"></div>
       </div>
       <form id="form-add-llm-key" class="flex gap-2" onsubmit="return false;">
         <input id="input-llm-key" type="text" placeholder="Paste API key"
-               class="flex-1 border border-gray-200 rounded px-3 py-2 text-sm font-mono
+               class="flex-1 border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 text-sm font-mono
                       focus:outline-none focus:ring-2 focus:ring-gray-400" />
         <button type="submit"
-                class="px-4 py-2 bg-gray-900 text-white text-sm rounded hover:bg-gray-700
-                       focus:outline-none focus:ring-2 focus:ring-gray-400">
+                class="px-4 py-2 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 text-sm rounded
+                       hover:bg-gray-700 dark:hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-400">
           Add
         </button>
       </form>
@@ -204,13 +223,13 @@ function activateTab(idx) {
     const panel = document.getElementById(t.panel);
     if (i === idx) {
       btn.setAttribute('aria-selected', 'true');
-      btn.classList.remove('border-transparent', 'text-gray-500');
-      btn.classList.add('border-gray-900', 'text-gray-900');
+      btn.classList.remove('border-transparent', 'text-gray-500', 'dark:text-gray-400');
+      btn.classList.add('border-gray-900', 'dark:border-gray-100', 'text-gray-900', 'dark:text-gray-100');
       panel.classList.remove('hidden');
     } else {
       btn.setAttribute('aria-selected', 'false');
-      btn.classList.add('border-transparent', 'text-gray-500');
-      btn.classList.remove('border-gray-900', 'text-gray-900');
+      btn.classList.add('border-transparent', 'text-gray-500', 'dark:text-gray-400');
+      btn.classList.remove('border-gray-900', 'dark:border-gray-100', 'text-gray-900', 'dark:text-gray-100');
       panel.classList.add('hidden');
     }
   });
@@ -232,9 +251,9 @@ function renderRepos() {
   empty.classList.add('hidden');
   cfg.repos.forEach((repo, idx) => {
     const row = document.createElement('div');
-    row.className = 'flex items-center justify-between border border-gray-200 rounded px-3 py-2 text-sm';
+    row.className = 'flex items-center justify-between border border-gray-200 dark:border-gray-700 rounded px-3 py-2 text-sm';
     row.innerHTML = `
-      <span class="font-mono text-gray-800 truncate flex-1 mr-2">${escHtml(repo)}</span>
+      <span class="font-mono text-gray-800 dark:text-gray-200 truncate flex-1 mr-2">${escHtml(repo)}</span>
       <button data-idx="${idx}" class="btn-remove-repo text-gray-400 hover:text-red-500 text-xs
               focus:outline-none focus:ring-2 focus:ring-red-300 rounded px-2 py-1">Remove</button>
     `;
@@ -255,9 +274,9 @@ function renderKeyList(containerId, keys, onRemove) {
   container.innerHTML = '';
   (keys || []).forEach((key, idx) => {
     const row = document.createElement('div');
-    row.className = 'flex items-center gap-2 border border-gray-200 rounded px-3 py-2 text-sm';
+    row.className = 'flex items-center gap-2 border border-gray-200 dark:border-gray-700 rounded px-3 py-2 text-sm';
     const display = document.createElement('span');
-    display.className = 'font-mono text-gray-800 flex-1 truncate';
+    display.className = 'font-mono text-gray-800 dark:text-gray-200 flex-1 truncate';
     display.textContent = maskKey(key);
     let revealed = false;
     const showBtn = document.createElement('button');
@@ -440,6 +459,21 @@ document.getElementById('embedding-provider').addEventListener('change', (e) => 
 document.getElementById('llm-provider').addEventListener('change', (e) => {
   if (cfg) { cfg.llm.provider = e.target.value; saveNow(); }
 });
+
+// ─── Theme toggle ─────────────────────────────────────────────────────────
+function updateThemeIcon() {
+  const isDark = document.documentElement.classList.contains('dark');
+  document.getElementById('icon-sun').classList.toggle('hidden', !isDark);
+  document.getElementById('icon-moon').classList.toggle('hidden', isDark);
+}
+
+document.getElementById('btn-theme').addEventListener('click', () => {
+  const isDark = document.documentElement.classList.toggle('dark');
+  localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  updateThemeIcon();
+});
+
+updateThemeIcon();
 
 // ─── Init ─────────────────────────────────────────────────────────────────
 loadConfig();
