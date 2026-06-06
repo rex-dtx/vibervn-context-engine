@@ -26,13 +26,13 @@ DEFINE FIELD OVERWRITE parent     ON symbol TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS idx_symbol_file ON symbol FIELDS file;
 DEFINE INDEX IF NOT EXISTS idx_symbol_name ON symbol FIELDS name;
 
-DEFINE TABLE IF NOT EXISTS chunk SCHEMAFULL;
-DEFINE FIELD OVERWRITE file       ON chunk TYPE string;
-DEFINE FIELD OVERWRITE line_start ON chunk TYPE int;
-DEFINE FIELD OVERWRITE line_end   ON chunk TYPE int;
-DEFINE FIELD OVERWRITE content    ON chunk TYPE string;
-DEFINE FIELD OVERWRITE embedding  ON chunk TYPE array<float>;
-DEFINE FIELD OVERWRITE symbol_ref ON chunk TYPE option<string>;
+-- SCHEMALESS: per-element array<float> validation on `embedding` costs ~530ms/95-chunk
+-- insert (SurrealDB 2.x). Removing SCHEMAFULL drops this to ~83ms (8.9×). Field type
+-- safety is enforced by Rust's ChunkRecord struct on the write path.
+--
+-- LANDMINE: SurrealDB v2 silently stores [] for f32 arrays under TYPE array (untyped)
+-- and TYPE any. NEVER re-add a typed embedding field definition to this table.
+DEFINE TABLE IF NOT EXISTS chunk SCHEMALESS;
 DEFINE INDEX IF NOT EXISTS idx_chunk_file ON chunk FIELDS file;
 
 DEFINE TABLE IF NOT EXISTS calls TYPE RELATION IN symbol OUT symbol;

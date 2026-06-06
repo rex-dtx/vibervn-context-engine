@@ -228,7 +228,7 @@ impl VectorIndex {
         }
 
         let rows: Vec<Row> = db
-            .query("SELECT file, line_start, line_end, embedding FROM chunk WHERE embedding != []")
+            .query("SELECT file, line_start, line_end, embedding FROM chunk WHERE embedding IS NOT NONE")
             .await
             .context("load embeddings from chunk table")?
             .take(0)?;

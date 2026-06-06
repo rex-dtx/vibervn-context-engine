@@ -427,6 +427,17 @@ async fn run_consumer(
             })
             .collect();
 
+        // Check durable needs_rebuild flag (set by v2→v3 migration if gating readback failed).
+        let force_rebuild = force_rebuild || {
+            match store::ops::get_meta(&db, "needs_rebuild").await {
+                Ok(Some(v)) if v == "1" => {
+                    info!(repo = %repo, "needs_rebuild flag set — forcing full rebuild");
+                    true
+                }
+                _ => false,
+            }
+        };
+
         let pipeline = {
             // total in-flight batches = per-key concurrency × number of keys.
             let n_keys = settings_ref.embedding.api_keys.len().max(1);
@@ -472,6 +483,10 @@ async fn run_consumer(
                 // Persist durable timestamp so the MCP tool can check freshness
                 // without relying on in-memory state.
                 let _ = crate::store::ops::set_meta(&db, "last_indexed_at", &chrono::Utc::now().to_rfc3339()).await;
+                // Clear needs_rebuild flag after successful rebuild.
+                if force_rebuild {
+                    let _ = db.query("DELETE FROM index_meta WHERE key = 'needs_rebuild'").await;
+                }
                 engine_ref.event_bus.emit(IndexEvent::Completed {
                     repo: repo.clone(),
                     indexed_files: stats.indexed_files,

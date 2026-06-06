@@ -559,7 +559,7 @@ pub async fn sample_embedding_dim(db: &Surreal<Db>) -> Result<u64> {
     let rows: Vec<CountRow> = db
         .query(
             "SELECT array::len(embedding) AS count FROM chunk \
-             WHERE embedding != [] LIMIT 1",
+             WHERE embedding IS NOT NONE LIMIT 1",
         )
         .await
         .context("sample embedding dim")?
