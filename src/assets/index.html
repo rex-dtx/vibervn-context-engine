@@ -426,6 +426,18 @@
              class="relative border border-gray-200 dark:border-wiki-border rounded bg-white dark:bg-wiki-surface overflow-hidden"
              style="height: 360px;">
           <svg id="graph-svg" class="w-full h-full block" role="img" aria-label="Call graph visualization"></svg>
+          <div id="graph-loading" class="hidden absolute inset-0" aria-hidden="true">
+            <div class="absolute inset-0 animate-pulse">
+              <span class="absolute rounded-full bg-gray-200 dark:bg-wiki-border" style="width:16px;height:16px;left:47%;top:43%"></span>
+              <span class="absolute rounded-full bg-gray-200 dark:bg-wiki-border" style="width:11px;height:11px;left:37%;top:52%"></span>
+              <span class="absolute rounded-full bg-gray-200 dark:bg-wiki-border" style="width:12px;height:12px;left:58%;top:39%"></span>
+              <span class="absolute rounded-full bg-gray-200 dark:bg-wiki-border" style="width:9px;height:9px;left:52%;top:58%"></span>
+              <span class="absolute rounded-full bg-gray-200 dark:bg-wiki-border" style="width:14px;height:14px;left:43%;top:33%"></span>
+              <span class="absolute rounded-full bg-gray-200 dark:bg-wiki-border" style="width:8px;height:8px;left:63%;top:53%"></span>
+              <span class="absolute rounded-full bg-gray-200 dark:bg-wiki-border" style="width:7px;height:7px;left:34%;top:40%"></span>
+            </div>
+            <div class="absolute inset-x-0 bottom-3 text-center text-xs text-gray-400 dark:text-wiki-text-muted">Loading call graph…</div>
+          </div>
           <div id="graph-empty"
                class="hidden absolute inset-0 flex items-center justify-center text-sm text-gray-400 dark:text-wiki-text-muted">
             No call relationships in the index yet.
@@ -1109,6 +1121,8 @@ function openRepoSearch(repo) {
 
 function closeRepoSearch() {
   currentSearchRepo = null;
+  resetCallGraph();
+  searchToken++;   // invalidate any in-flight repo search so it can't render into the next view
   document.getElementById('search-page').classList.add('hidden');
   document.getElementById('main-content').classList.remove('hidden');
 }
@@ -1307,6 +1321,7 @@ async function runSearch() {
   const q = input.value.trim();
   if (!q) return;
 
+  const token = ++searchToken;
   btn.disabled = true;
   btn.textContent = 'Searching…';
   errorEl.classList.add('hidden');
@@ -1324,6 +1339,7 @@ async function runSearch() {
       body: JSON.stringify(payload),
     });
     const data = await res.json();
+    if (token !== searchToken) return;   // a newer search or a reset superseded this one
     if (!res.ok) {
       errorEl.textContent = data.error || `Search failed (HTTP ${res.status})`;
       errorEl.classList.remove('hidden');
@@ -1395,11 +1411,14 @@ async function runSearch() {
       timingEl.classList.remove('hidden');
     }
   } catch (err) {
+    if (token !== searchToken) return;   // stale failure — don't overwrite a newer search
     errorEl.textContent = 'Network error: ' + err.message;
     errorEl.classList.remove('hidden');
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Search';
+    if (token === searchToken) {   // only the current search owns the button state
+      btn.disabled = false;
+      btn.textContent = 'Search';
+    }
   }
 }
 
@@ -1486,6 +1505,13 @@ document.getElementById('input-search').addEventListener('keydown', (e) => {
 let explorerFiles = [];      // full file list from the server
 let explorerFileFilter = '';
 let graphData = { nodes: [], edges: [] };
+// Generation tokens: each async loader captures the current value, and a later
+// load/reset bumps it so a slow fetch resolving against a superseded view bails
+// instead of clobbering it. explorerLoadToken is shared by the three loaders
+// that loadExplorer() fires as a unit (stats/files/graph).
+let explorerLoadToken = 0;
+let chunkLoadToken = 0;
+let searchToken = 0;
 
 // Color-code graph nodes by source language (derived from file extension).
 const LANG_COLORS = {
@@ -1545,7 +1571,15 @@ function fmtBytes(n) {
 async function loadExplorer() {
   if (!currentSearchRepo) return;
   setExplorerActionStatus('');
-  await Promise.all([loadExplorerStats(), loadExplorerFiles(), loadExplorerGraph()]);
+  // Bump once for the whole trio; the three loaders run in parallel and share
+  // this token, so they must read it — not each re-bump it (that would make
+  // them invalidate one another).
+  const token = ++explorerLoadToken;
+  await Promise.all([
+    loadExplorerStats(token),
+    loadExplorerFiles(token),
+    loadExplorerGraph(token),
+  ]);
 }
 
 function setExplorerActionStatus(msg, isError) {
@@ -1565,12 +1599,29 @@ function statCell(label, value, opts) {
   '</div>';
 }
 
-async function loadExplorerStats() {
+// Placeholder grid matching the real stat layout (7 tiles + a full-width row),
+// so the box pulses in place instead of flashing empty during fetch.
+function statSkeleton() {
+  const tile = '<div class="bg-white dark:bg-wiki-surface px-3 py-2">' +
+    '<div class="h-2 w-12 rounded bg-gray-100 dark:bg-wiki-border animate-pulse"></div>' +
+    '<div class="h-3.5 w-16 mt-1.5 rounded bg-gray-100 dark:bg-wiki-border animate-pulse"></div>' +
+  '</div>';
+  return tile.repeat(7) +
+    '<div class="bg-white dark:bg-wiki-surface px-3 py-2 col-span-2 sm:col-span-3">' +
+      '<div class="h-2 w-20 rounded bg-gray-100 dark:bg-wiki-border animate-pulse"></div>' +
+      '<div class="h-3 w-2/3 mt-1.5 rounded bg-gray-100 dark:bg-wiki-border animate-pulse"></div>' +
+    '</div>';
+}
+
+async function loadExplorerStats(token) {
   const repoId = encodeRepoId(currentSearchRepo);
   const box = document.getElementById('explorer-stats');
+  // Skeleton tiles while fetching — same shape as the real grid so layout doesn't jump.
+  box.innerHTML = statSkeleton();
   try {
     const res = await fetch('/api/repos/' + repoId + '/index-stats');
     const data = await res.json();
+    if (token !== explorerLoadToken) return;   // superseded by a later load/reset
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     const status = indexStatuses[currentSearchRepo];
     const staleLabel = status && status.state === 'indexing' ? 'Indexing…'
@@ -1589,19 +1640,25 @@ async function loadExplorerStats() {
         '<div class="text-xs text-gray-700 dark:text-wiki-text font-mono truncate select-all" title="' + escHtml(data.db_path || '') + '">' + escHtml(data.db_path || '—') + '</div>' +
       '</div>';
   } catch (e) {
+    if (token !== explorerLoadToken) return;   // stale failure — don't overwrite current view
     box.innerHTML = '<div class="bg-white dark:bg-wiki-surface px-3 py-2 col-span-2 sm:col-span-3 text-sm text-red-500 dark:text-red-400">Failed to load stats: ' + escHtml(e.message) + '</div>';
   }
 }
 
 // ─── File browser ───────────────────────────────────────────────────────────
-async function loadExplorerFiles() {
+async function loadExplorerFiles(token) {
   const repoId = encodeRepoId(currentSearchRepo);
   const listEl = document.getElementById('files-list');
   const emptyEl = document.getElementById('files-empty');
   const truncEl = document.getElementById('files-truncated');
+  // Skeleton rows while fetching — the list box is otherwise blank on first open.
+  emptyEl.classList.add('hidden');
+  truncEl.classList.add('hidden');
+  listEl.innerHTML = fileRowSkeleton();
   try {
     const res = await fetch('/api/repos/' + repoId + '/files');
     const data = await res.json();
+    if (token !== explorerLoadToken) return;   // superseded by a later load/reset
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     explorerFiles = data.files || [];
     truncEl.className = 'text-amber-600 dark:text-amber-400 text-xs mt-2';
@@ -1609,12 +1666,24 @@ async function loadExplorerFiles() {
     if (data.truncated) truncEl.textContent = 'Showing the first ' + explorerFiles.length + ' files. Use the filter to narrow down.';
     renderFiles();
   } catch (e) {
+    if (token !== explorerLoadToken) return;   // stale failure — don't overwrite current view
     listEl.innerHTML = '';
     emptyEl.classList.add('hidden');
     truncEl.classList.remove('hidden');
     truncEl.className = 'text-red-500 dark:text-red-400 text-xs mt-2';
     truncEl.textContent = 'Failed to load files: ' + e.message;
   }
+}
+
+// Placeholder rows matching a file row's layout (dot + name + meta columns).
+function fileRowSkeleton() {
+  const row = '<div class="w-full flex items-center gap-3 px-3 py-2">' +
+    '<span class="inline-block w-2 h-2 rounded-full flex-none bg-gray-100 dark:bg-wiki-border animate-pulse"></span>' +
+    '<span class="h-3 rounded bg-gray-100 dark:bg-wiki-border animate-pulse flex-1"></span>' +
+    '<span class="h-3 w-12 rounded bg-gray-100 dark:bg-wiki-border animate-pulse"></span>' +
+    '<span class="h-3 w-10 rounded bg-gray-100 dark:bg-wiki-border animate-pulse"></span>' +
+  '</div>';
+  return row.repeat(6);
 }
 
 function renderFiles() {
@@ -1663,6 +1732,7 @@ document.getElementById('input-file-filter').addEventListener('input', (e) => {
 
 // ─── Chunk detail panel ─────────────────────────────────────────────────────
 async function openChunkDetail(file) {
+  const token = ++chunkLoadToken;
   const panel = document.getElementById('chunk-detail');
   const title = document.getElementById('chunk-detail-title');
   const body = document.getElementById('chunk-detail-body');
@@ -1679,9 +1749,11 @@ async function openChunkDetail(file) {
   try {
     const res = await fetch('/api/repos/' + repoId + '/chunks?file=' + encodeURIComponent(file));
     const data = await res.json();
+    if (token !== chunkLoadToken) return;   // a newer file click or reset superseded this one
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     renderChunkDetail(file, data.chunks || []);
   } catch (e) {
+    if (token !== chunkLoadToken) return;   // stale failure — don't overwrite current chunk view
     body.innerHTML = '<div class="px-3 py-2 text-sm text-red-500 dark:text-red-400">Failed to load chunks: ' + escHtml(e.message) + '</div>';
   }
 }
@@ -1742,12 +1814,44 @@ document.getElementById('btn-chunk-close').addEventListener('click', () => {
 // ─── Call graph (vanilla SVG force layout) ──────────────────────────────────
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-async function loadExplorerGraph() {
+// Wipe all call-graph state so a fresh entry recomputes the default layout
+// instead of flashing the previous repo's (possibly dragged) graph.
+function resetCallGraph() {
+  // Invalidate any in-flight explorer load (stats/files/graph) so none can render
+  // stale data into the freshly-reset view. Also invalidate a pending chunk fetch
+  // so it can't repaint the closed detail panel.
+  explorerLoadToken++;
+  chunkLoadToken++;
+  graphData = { nodes: [], edges: [] };
+  const svg = document.getElementById('graph-svg');
+  if (svg) { while (svg.firstChild) svg.removeChild(svg.firstChild); }
+  const meta = document.getElementById('graph-meta');
+  if (meta) meta.textContent = '';
+  const legend = document.getElementById('graph-legend');
+  if (legend) legend.innerHTML = '';
+  const empty = document.getElementById('graph-empty');
+  if (empty) empty.classList.add('hidden');
+  const loading = document.getElementById('graph-loading');
+  if (loading) loading.classList.add('hidden');
+  const detail = document.getElementById('chunk-detail');
+  if (detail) detail.classList.add('hidden');
+}
+
+async function loadExplorerGraph(token) {
   const repoId = encodeRepoId(currentSearchRepo);
   const metaEl = document.getElementById('graph-meta');
+  const loadingEl = document.getElementById('graph-loading');
+  const emptyEl = document.getElementById('graph-empty');
+  // Skeleton placeholder while the graph fetches — large repos can take a beat,
+  // and an empty box reads as "broken". Hidden the moment the load settles.
+  if (loadingEl) loadingEl.classList.remove('hidden');
+  if (emptyEl) emptyEl.classList.add('hidden');
+  metaEl.textContent = '';
   try {
     const res = await fetch('/api/repos/' + repoId + '/graph');
     const data = await res.json();
+    if (token !== explorerLoadToken) return;   // superseded by a later load/reset — discard
+    if (loadingEl) loadingEl.classList.add('hidden');
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     graphData = { nodes: data.nodes || [], edges: data.edges || [] };
     metaEl.textContent = graphData.nodes.length + ' nodes · ' + graphData.edges.length + ' edges' +
@@ -1755,6 +1859,8 @@ async function loadExplorerGraph() {
     renderGraph();
     renderGraphLegend();
   } catch (e) {
+    if (token !== explorerLoadToken) return;   // stale failure — don't overwrite the current view
+    if (loadingEl) loadingEl.classList.add('hidden');
     metaEl.textContent = 'Failed to load: ' + e.message;
   }
 }
