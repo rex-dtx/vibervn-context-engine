@@ -37,6 +37,12 @@ const WRITE_BATCH_SIZE: usize = 512;
 /// 8192 reduces the full-rebuild flush to ~10 round-trips for 77K resolved edges.
 const EDGE_RELATE_BATCH_SIZE: usize = 8192;
 
+/// Batch size for raw_edge INSERT writes in Stage 3.
+/// Raw edges are small records (no embedding payload), so larger batches
+/// reduce round-trips significantly (138K edges / 4096 = ~34 batches vs
+/// 138K / 512 = ~270 batches). Keep below 8192 to avoid oversized payloads.
+const RAW_EDGE_INSERT_BATCH_SIZE: usize = 4096;
+
 /// Streaming channel capacity. Parser feeds at most this many parsed-file results
 /// into the embed stage before blocking. Keeps peak inflight bounded independent
 /// of repo size (O(channel_cap * chunks_per_file) RAM, not O(repo)).
@@ -425,11 +431,12 @@ impl IndexPipeline {
             .await;
 
         // Stream parse → embed → write with bounded channels.
-        // collect_raw_edges=true: raw edges are returned in-memory instead of
-        // being written to the raw_edge DB table. Phase 2 reads them directly,
-        // saving ~7s of DB writes and ~15s of DB table scan.
-        let (chunk_vectors, mut stats, raw_edges_mem) = self
-            .streaming_index(&all_files, db, progress, event_bus, key_hints, true)
+        // Raw edges are written to the `raw_edge` DB table during Stage 3 (same as
+        // the incremental path), providing crash-safe replay in Phase 2 and keeping
+        // memory bounded (symbol map + one raw_edge page + one edge batch), independent
+        // of total edge count.
+        let (chunk_vectors, mut stats) = self
+            .streaming_index(&all_files, db, progress, event_bus, key_hints)
             .await
             .context("full_rebuild: streaming_index")?;
 
@@ -438,9 +445,9 @@ impl IndexPipeline {
             bus.emit(IndexEvent::Phase2Start { repo: self.repo.clone() });
         }
         let phase2_start = Instant::now();
-        self.resolve_edges_phase2_in_memory(db, raw_edges_mem)
+        self.resolve_edges_phase2(db)
             .await
-            .context("full_rebuild: resolve_edges_phase2_in_memory")?;
+            .context("full_rebuild: resolve_edges_phase2")?;
         let phase2_ms = phase2_start.elapsed().as_millis() as u64;
         stats.phase2_ms = phase2_ms;
         if let Some(bus) = event_bus {
@@ -508,9 +515,9 @@ impl IndexPipeline {
             .context("incremental_run: delete_files_data_bulk")?;
 
         // Stream parse → embed → write.
-        // collect_raw_edges=false: raw edges go to DB (crash-safe incremental path).
-        let (chunk_vectors, _stage_stats, _empty_raw_edges) = self
-            .streaming_index(&to_process, db, progress, event_bus, key_hints, false)
+        // Raw edges go to DB (crash-safe incremental path).
+        let (chunk_vectors, _stage_stats) = self
+            .streaming_index(&to_process, db, progress, event_bus, key_hints)
             .await
             .context("incremental_run: streaming_index")?;
 
@@ -549,12 +556,10 @@ impl IndexPipeline {
     /// Peak inflight = PARSE_CHANNEL_CAP + EMBED_CHANNEL_CAP parsed/embedded files
     /// (O(channels * chunks_per_file)), independent of total repo size.
     ///
-    /// When `collect_raw_edges` is true (full-rebuild path), raw edges are
-    /// accumulated in-memory and returned instead of being written to the
-    /// `raw_edge` DB table. This eliminates ~7s of small DB writes + the
-    /// ~15s Phase-2 DB scan, at the cost of ~24 MB in-memory (138K edges × ~170B).
-    /// The incremental path passes false and relies on the `raw_edge` table for
-    /// crash-safe partial re-resolution.
+    /// Raw edges are always written to the `raw_edge` DB table (both full-rebuild and
+    /// incremental paths). Phase 2 reads them back via O(N) file-keyset pagination,
+    /// keeping peak memory bounded: symbol map + one raw_edge page + one edge batch,
+    /// independent of total raw_edge count and safe at Linux/Chromium scale.
     async fn streaming_index(
         &self,
         files: &[String],
@@ -562,14 +567,13 @@ impl IndexPipeline {
         progress: Option<&ProgressHandle>,
         event_bus: Option<&IndexEventBus>,
         key_hints: &[String],
-        collect_raw_edges: bool,
-    ) -> Result<(Vec<(ChunkId, Vec<f32>)>, IndexPipelineStats, Vec<RawEdgeRecord>)> {
+    ) -> Result<(Vec<(ChunkId, Vec<f32>)>, IndexPipelineStats)> {
         if files.is_empty() {
             if let Some(ph) = progress {
                 ph.set_run_total(0).await;
                 ph.set_processed(0).await;
             }
-            return Ok((vec![], IndexPipelineStats::default(), vec![]));
+            return Ok((vec![], IndexPipelineStats::default()));
         }
 
         let total_files = files.len() as u64;
@@ -755,9 +759,6 @@ impl IndexPipeline {
         // Reduces symbol write round-trips from O(files) to O(total_symbols/SYM_BATCH_SIZE).
         const SYM_BATCH_SIZE: usize = 2048;
         let mut pending_symbol_batch: Vec<Symbol> = Vec::with_capacity(SYM_BATCH_SIZE);
-        // In-memory raw edge accumulator: populated when collect_raw_edges=true (full rebuild).
-        // Avoids DB writes + DB scan for raw_edge — saves ~22s on real-disk SurrealDB.
-        let mut in_memory_raw_edges: Vec<RawEdgeRecord> = Vec::new();
 
         while let Some(ef) = embed_rx.recv().await {
             // Measure queue wait: time from when EmbeddedFile was created in Stage 2
@@ -785,16 +786,14 @@ impl IndexPipeline {
             // ── raw edges ──────────────────────────────────────────────
             let t1 = Instant::now();
             total_raw_edges_count += ef.raw_edges.len() as u64;
-            if collect_raw_edges {
-                // Full-rebuild path: accumulate in memory.
-                // Phase 2 will resolve these without a DB round-trip.
-                in_memory_raw_edges.extend(ef.raw_edges);
-            } else {
-                // Incremental path: persist to DB for Phase-2 keyset scan.
-                flush_raw_edge_batch_native(db, &ef.raw_edges)
-                    .await
-                    .context("streaming_index: raw_edges")?;
-            }
+            // Persist to DB for Phase-2 file-keyset scan. Both full-rebuild and
+            // incremental paths write raw edges here; Phase 2 reads them back in
+            // O(N) bounded pages. This is the crash-safe anchor: if the process
+            // dies after Stage 3 but before Phase 2 completes, the next run
+            // detects the absent `edges_resolved` marker and replays Phase 2.
+            flush_raw_edge_batch_native(db, &ef.raw_edges)
+                .await
+                .context("streaming_index: raw_edges")?;
             rawedge_ns += t1.elapsed().as_nanos() as u64;
 
             // ── chunks (cross-file batched) ────────────────────────────
@@ -944,7 +943,7 @@ impl IndexPipeline {
             cache_miss_chunks: total_cache_miss_chunks,
         };
 
-        Ok((all_chunk_vectors, stats, in_memory_raw_edges))
+        Ok((all_chunk_vectors, stats))
     }
 
     // ─── Phase 2: batched edge resolution ────────────────────────────────
@@ -1102,6 +1101,19 @@ impl IndexPipeline {
             });
         }
 
+        // Drop all 4 calls indexes before the bulk RELATE flush to eliminate per-insert
+        // index maintenance overhead (~4 index updates × 77K rows). Rebuild synchronously
+        // after all RELATEs are committed — much faster than writing through live indexes.
+        // This is the same drop→bulk-write→rebuild trick used in the old in-memory path.
+        let t_idx_drop = Instant::now();
+        db.query(
+            "REMOVE INDEX IF EXISTS idx_calls_in_file  ON calls; \
+             REMOVE INDEX IF EXISTS idx_calls_out_file ON calls; \
+             REMOVE INDEX IF EXISTS idx_calls_in_name  ON calls; \
+             REMOVE INDEX IF EXISTS idx_calls_out_name ON calls;"
+        ).await.context("phase2: drop calls indexes")?;
+        info!(repo = %self.repo, idx_drop_ms = t_idx_drop.elapsed().as_millis() as u64, "phase2: dropped calls indexes");
+
         // Stream raw_edge in O(N) passes via file-keyset pagination.
         //
         // Strategy: paginate the outer loop by `from_file` (the indexed field), processing
@@ -1226,157 +1238,26 @@ impl IndexPipeline {
         }
         info!(repo = %self.repo, flush_tail_ms = t_flush_tail.elapsed().as_millis() as u64, "phase2: tail flush complete");
 
-        // Stamp the edges_resolved marker ONLY after all pages commit.
+        // Rebuild calls indexes synchronously after all bulk RELATEs are committed.
+        // Synchronous (no CONCURRENTLY) so the rebuild completes before this function
+        // returns — the index is fully available and the wall-clock is honestly counted.
+        // idx_rebuild_ms > 0 in logs proves the rebuild is real and not deferred.
+        let t_idx_rebuild = Instant::now();
+        db.query(
+            "DEFINE INDEX IF NOT EXISTS idx_calls_in_file  ON calls FIELDS in_file; \
+             DEFINE INDEX IF NOT EXISTS idx_calls_out_file ON calls FIELDS out_file; \
+             DEFINE INDEX IF NOT EXISTS idx_calls_in_name  ON calls FIELDS in_name; \
+             DEFINE INDEX IF NOT EXISTS idx_calls_out_name ON calls FIELDS out_name;"
+        ).await.context("phase2: rebuild calls indexes")?;
+        let idx_rebuild_ms = t_idx_rebuild.elapsed().as_millis() as u64;
+        info!(repo = %self.repo, idx_rebuild_ms, "phase2: rebuilt calls indexes synchronously");
+
+        // Stamp the edges_resolved marker ONLY after all pages commit AND indexes rebuild.
         set_meta(db, EDGES_RESOLVED_KEY, "1")
             .await
             .context("phase2: set edges_resolved marker")?;
 
         info!(repo = %self.repo, "Phase 2 edge resolution complete");
-        Ok(())
-    }
-
-    // ─── Full-rebuild Phase 2: in-memory edge resolution ─────────────────
-
-    /// Resolve raw edges in-memory for full-rebuild path.
-    ///
-    /// Unlike `resolve_edges_phase2` (which scans the `raw_edge` DB table),
-    /// this method accepts the edges returned directly from `streaming_index`
-    /// when `collect_raw_edges = true`.  This eliminates:
-    ///   - ~7s of small DB writes (INSERT INTO raw_edge per-file)
-    ///   - ~15s of DB table scan (keyset pagination over raw_edge)
-    ///
-    /// Memory: 138K edges × ~170B ≈ 24 MB — bounded and safe at repo scale.
-    /// The symbol map is loaded once from the DB (3.3 MB, same as the DB path).
-    ///
-    /// Bulk-write optimization: drops the 4 calls indexes before the RELATE flush
-    /// (eliminates per-insert index maintenance on 77K rows) and recreates them
-    /// after, which is faster than writing through live indexes.
-    async fn resolve_edges_phase2_in_memory(
-        &self,
-        db: &Surreal<Db>,
-        raw_edges: Vec<RawEdgeRecord>,
-    ) -> Result<()> {
-        // Delete all existing calls edges (rewriting from scratch).
-        db.query("DELETE FROM calls").await.context("phase2_mem: delete calls")?;
-
-        let total = raw_edges.len();
-        info!(repo = %self.repo, total_raw_edges = total, "phase2_mem: starting in-memory edge resolution");
-
-        if total == 0 {
-            set_meta(db, EDGES_RESOLVED_KEY, "1")
-                .await
-                .context("phase2_mem: set edges_resolved marker (empty)")?;
-            return Ok(());
-        }
-
-        // Load ALL symbols into memory for O(1) per-edge lookup.
-        let t_sym_load = Instant::now();
-        let all_symbols = load_all_symbols(db).await.context("phase2_mem: load all symbols")?;
-        let sym_load_ms = t_sym_load.elapsed().as_millis();
-        info!(repo = %self.repo, symbol_count = all_symbols.len(), sym_load_ms, "phase2_mem: loaded all symbols");
-
-        // Build name → Vec<SymbolWithPos> lookup map.
-        let mut name_bucket: HashMap<String, Vec<SymbolWithPos>> = HashMap::new();
-        for s in all_symbols {
-            name_bucket.entry(s.name.clone()).or_default().push(s);
-        }
-        for bucket in name_bucket.values_mut() {
-            bucket.sort_unstable_by(|a, b| {
-                a.file.cmp(&b.file)
-                    .then(a.line_start.cmp(&b.line_start))
-                    .then(a.line_end.cmp(&b.line_end))
-            });
-        }
-
-        // Resolve all in-memory raw edges and write RELATE batches.
-        // Drop calls indexes before the bulk RELATE flush to eliminate per-insert
-        // index maintenance overhead (~4 index updates × 77K rows). Rebuild after.
-        let t_idx_drop = Instant::now();
-        db.query(
-            "REMOVE INDEX IF EXISTS idx_calls_in_file  ON calls; \
-             REMOVE INDEX IF EXISTS idx_calls_out_file ON calls; \
-             REMOVE INDEX IF EXISTS idx_calls_in_name  ON calls; \
-             REMOVE INDEX IF EXISTS idx_calls_out_name ON calls;"
-        ).await.context("phase2_mem: drop calls indexes")?;
-        info!(repo = %self.repo, idx_drop_ms = t_idx_drop.elapsed().as_millis() as u64, "phase2_mem: dropped calls indexes");
-
-        let t_resolve_start = Instant::now();
-        let mut edge_batch: Vec<(String, String, i64, String, String, String, String)> = Vec::new();
-        let mut resolved_count: u64 = 0;
-        let mut dropped_count: u64 = 0;
-
-        for row in &raw_edges {
-            let resolved_to = match name_bucket.get(&row.to_name) {
-                Some(candidates) if !candidates.is_empty() => {
-                    IndexPipeline::select_best_candidate(
-                        candidates,
-                        &row.from_file,
-                        row.import_path.as_deref(),
-                    ).cloned()
-                }
-                _ => {
-                    debug!(name = %row.to_name, "phase2_mem: dropping unresolved raw edge");
-                    dropped_count += 1;
-                    None
-                }
-            };
-
-            if let Some(to) = resolved_to {
-                resolved_count += 1;
-                edge_batch.push((
-                    row.from_fqn.clone(),
-                    to.fqn.clone(),
-                    row.line,
-                    row.from_file.clone(),
-                    to.file.clone(),
-                    row.from_fqn.clone(),
-                    to.fqn.clone(),
-                ));
-
-                if edge_batch.len() >= EDGE_RELATE_BATCH_SIZE {
-                    flush_edge_batch(db, &edge_batch)
-                        .await
-                        .context("phase2_mem: flush edge batch")?;
-                    edge_batch.clear();
-                }
-            }
-        }
-
-        // Flush remaining edges.
-        if !edge_batch.is_empty() {
-            flush_edge_batch(db, &edge_batch)
-                .await
-                .context("phase2_mem: flush tail edge batch")?;
-        }
-
-        let resolve_elapsed_ms = t_resolve_start.elapsed().as_millis() as u64;
-        info!(
-            repo = %self.repo,
-            total_raw_edges = total,
-            resolved_count,
-            dropped_count,
-            resolve_elapsed_ms,
-            "phase2_mem: in-memory resolve + write complete"
-        );
-
-        // Rebuild calls indexes after bulk write.
-        // Use CONCURRENTLY to rebuild in the background — the index is marked
-        // "building" and available for writes immediately; reads use it once done.
-        // This makes index rebuild non-blocking (wall time savings: ~6-7s).
-        let t_idx_rebuild = Instant::now();
-        db.query(
-            "DEFINE INDEX IF NOT EXISTS idx_calls_in_file  ON calls FIELDS in_file  CONCURRENTLY; \
-             DEFINE INDEX IF NOT EXISTS idx_calls_out_file ON calls FIELDS out_file CONCURRENTLY; \
-             DEFINE INDEX IF NOT EXISTS idx_calls_in_name  ON calls FIELDS in_name  CONCURRENTLY; \
-             DEFINE INDEX IF NOT EXISTS idx_calls_out_name ON calls FIELDS out_name CONCURRENTLY;"
-        ).await.context("phase2_mem: rebuild calls indexes")?;
-        info!(repo = %self.repo, idx_rebuild_ms = t_idx_rebuild.elapsed().as_millis() as u64, "phase2_mem: rebuilt calls indexes (async)");
-
-        set_meta(db, EDGES_RESOLVED_KEY, "1")
-            .await
-            .context("phase2_mem: set edges_resolved marker")?;
-
-        info!(repo = %self.repo, "Phase 2 (in-memory) edge resolution complete");
         Ok(())
     }
 
@@ -2080,7 +1961,7 @@ async fn flush_symbol_batch_native(db: &Surreal<Db>, symbols: &[Symbol]) -> Resu
 /// Flush raw edges (Phase 1) using native-bind INSERT.
 /// Raw edges are stored in `raw_edge` table for later Phase 2 resolution.
 async fn flush_raw_edge_batch_native(db: &Surreal<Db>, edges: &[RawEdgeRecord]) -> Result<()> {
-    for chunk in edges.chunks(WRITE_BATCH_SIZE) {
+    for chunk in edges.chunks(RAW_EDGE_INSERT_BATCH_SIZE) {
         let records: Vec<RawEdgeRecord> = chunk.to_vec();
         if !records.is_empty() {
             db.query("INSERT INTO raw_edge $data RETURN NONE")
