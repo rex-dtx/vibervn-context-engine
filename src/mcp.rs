@@ -448,7 +448,7 @@ async fn do_query(
             let mut out = String::new();
             for r in &result.results {
                 if !out.is_empty() {
-                    out.push('\n');
+                    out.push_str("\n\n");
                 }
                 let caller_tag = match (r.callers, r.caller_files) {
                     (Some(c), Some(f)) => format!(" [callers:{c} files:{f}]"),
