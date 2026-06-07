@@ -145,7 +145,10 @@ pub fn build_router(
     let session_manager = Arc::new(LocalSessionManager::default());
     let mcp_service = StreamableHttpService::new(
         move || {
-            let enabled = mcp_settings.blocking_read().enabled_mcp_tools.clone();
+            let enabled = mcp_settings
+                .try_read()
+                .map(|g| g.enabled_mcp_tools.clone())
+                .unwrap_or_else(|_| crate::config::Settings::default().enabled_mcp_tools);
             Ok(McpHandler::new(
                 mcp_home.clone(),
                 mcp_data.clone(),
