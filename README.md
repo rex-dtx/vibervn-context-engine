@@ -1,5 +1,30 @@
 # context-engine-rs
 
+## Install & Run
+
+Run the latest release directly with npx — no manual download, the correct
+prebuilt binary for your platform is fetched automatically:
+
+```bash
+npx vibervn-context-engine
+```
+
+This boots the HTTP server on port 6699 (web UI at http://127.0.0.1:6699,
+MCP endpoint at `/mcp`). Any CLI flags are forwarded to the binary:
+
+```bash
+npx vibervn-context-engine --port 8080 --bind 0.0.0.0
+```
+
+Or install it globally to get a persistent `vibervn-context-engine` command:
+
+```bash
+npm install -g vibervn-context-engine
+vibervn-context-engine --port 6699
+```
+
+Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
+
 ## Features
 
 | Feature | Description |
