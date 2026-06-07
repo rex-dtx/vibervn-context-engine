@@ -3,23 +3,25 @@
 ## Install & Run
 
 Run the latest release directly with npx — no manual download, the correct
-prebuilt binary for your platform is fetched automatically:
+prebuilt binary for your platform is fetched automatically. The `@latest`
+tag forces npx to fetch the newest published version instead of reusing a
+stale cached one:
 
 ```bash
-npx vibervn-context-engine
+npx vibervn-context-engine@latest
 ```
 
 This boots the HTTP server on port 6699 (web UI at http://127.0.0.1:6699,
 MCP endpoint at `/mcp`). Any CLI flags are forwarded to the binary:
 
 ```bash
-npx vibervn-context-engine --port 8080 --bind 0.0.0.0
+npx vibervn-context-engine@latest --port 8080 --bind 0.0.0.0
 ```
 
 Or install it globally to get a persistent `vibervn-context-engine` command:
 
 ```bash
-npm install -g vibervn-context-engine
+npm install -g vibervn-context-engine@latest
 vibervn-context-engine --port 6699
 ```
 
