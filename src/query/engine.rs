@@ -96,7 +96,7 @@ pub async fn run_query(
     // ── Step 2: Vector search ─────────────────────────────────────────────
     let search_start = Instant::now();
     // Search for 2× top_k so graph expansion has candidates to work with.
-    let raw_results = index_engine.vector_search(&embedding, top_k * 2).await;
+    let raw_results = index_engine.vector_search(&embedding, top_k * 2, repo_filter).await;
     let search_ms = search_start.elapsed().as_millis() as u64;
 
     if raw_results.is_empty() {

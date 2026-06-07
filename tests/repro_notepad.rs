@@ -14,12 +14,12 @@ use tempfile::TempDir;
 #[tokio::test]
 async fn schema_ddl_flips_stale_symbol_so_native_insert_persists() {
     use context_engine_rs::store::schema::SCHEMA_DDL;
-    use surrealdb::engine::local::SurrealKv;
+    use surrealdb::engine::local::RocksDb;
     use surrealdb::sql::{Array as SqlArray, Object as SqlObject, Value as SqlValue};
     use std::collections::BTreeMap;
 
     let dir = TempDir::new().unwrap();
-    let db = surrealdb::Surreal::new::<SurrealKv>(dir.path().to_str().unwrap()).await.unwrap();
+    let db = surrealdb::Surreal::new::<RocksDb>(dir.path().to_str().unwrap()).await.unwrap();
     db.use_ns("t").use_db("t").await.unwrap();
 
     // Oldest stale prod schema: parent declared as a record link + a sentinel row,
@@ -74,12 +74,12 @@ async fn schema_ddl_flips_stale_symbol_so_native_insert_persists() {
 /// error, exactly as the symbol flush path relies on.
 #[tokio::test]
 async fn insert_with_duplicate_id_merges_instead_of_failing() {
-    use surrealdb::engine::local::SurrealKv;
+    use surrealdb::engine::local::RocksDb;
     use surrealdb::sql::{Array as SqlArray, Object as SqlObject, Value as SqlValue};
     use std::collections::BTreeMap;
 
     let dir = TempDir::new().unwrap();
-    let db = surrealdb::Surreal::new::<SurrealKv>(dir.path().to_str().unwrap()).await.unwrap();
+    let db = surrealdb::Surreal::new::<RocksDb>(dir.path().to_str().unwrap()).await.unwrap();
     db.use_ns("t").use_db("t").await.unwrap();
     db.query("DEFINE TABLE symbol SCHEMALESS").await.unwrap();
 

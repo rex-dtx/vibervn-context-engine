@@ -22,7 +22,7 @@ use crate::indexing::pipeline::IndexPipeline;
 use crate::indexing::tracker::FileChange;
 use crate::indexing::watcher::start_watcher;
 use crate::store::{self, RepoDbMap};
-use crate::vector::{SearchResult, VectorIndex};
+use crate::vector::{SearchResult, ShardedSearch, ShardedVectorIndex, VectorIndex};
 
 // ─── Repo indexing status ─────────────────────────────────────────────────
 
@@ -104,8 +104,21 @@ pub struct IndexEngine {
     repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Channel sender for triggering index runs (manual or watcher-driven).
     trigger_tx: tokio::sync::mpsc::Sender<IndexTrigger>,
-    /// In-process vector index for fast cosine similarity search.
-    pub vector_index: Arc<RwLock<VectorIndex>>,
+    /// Per-repo sharded vector index with a resident-byte cap and repo-keyed LRU.
+    /// Bounds memory axis 2: only the active working set of repos stays resident;
+    /// cold repos are evicted and background-warmed on demand.
+    pub vector_index: Arc<RwLock<ShardedVectorIndex>>,
+    /// Repos with a background warm currently in flight. Guards against duplicate
+    /// concurrent `warm_repo_shard` tasks for the same repo: N queries hitting one
+    /// cold repo within its warm window spawn at most ONE warm (each warm does a
+    /// full load_from_db scan + competes for the RocksDB handle and write lock).
+    ///
+    /// A `std::sync::Mutex` (not tokio's) so the RAII [`WarmTicket`] can release the
+    /// claim from a synchronous `Drop` — guaranteeing the ticket is freed on ALL
+    /// exit paths (normal return, error, panic unwind, AND tokio task cancellation
+    /// at runtime shutdown). The critical section is a single HashSet op with no
+    /// await held across it, so a blocking std mutex is correct here.
+    warming: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Shared per-repo DB handles — the same map the server reads through, so
     /// indexer writes are visible to explorer/query reads (one instance per repo).
     repo_dbs: RepoDbMap,
@@ -121,38 +134,84 @@ pub struct IndexTrigger {
     pub rebuild: bool,
 }
 
-/// Load and merge the vector index from all configured repo DBs into one index.
+/// Warm one repo's vector shard: load its embeddings from DB into a temp
+/// `VectorIndex` (NO lock held during the scan), then install the finished shard
+/// under a short write lock. Returns the number of vectors loaded (0 on failure
+/// or empty repo). `active` shards are protected from eviction during install.
 ///
-/// Each repo is opened and loaded independently; a failure to open or load any
-/// single repo is logged and skipped so the remaining repos still load. This is
-/// the startup path that makes every indexed repo searchable (not just the first).
-pub(crate) async fn load_repos_vector_index(
+/// This is the single warm path used by both boot warming and lazy on-query warm.
+/// The lock-order contract (repo_dbs → vector_index) holds: `get_or_open` touches
+/// only repo_dbs; the write lock on vector_index is taken AFTER repo_dbs work is
+/// done and the DB scan has completed.
+pub(crate) async fn warm_repo_shard(
+    vector_index: &Arc<RwLock<ShardedVectorIndex>>,
+    repo_dbs: &RepoDbMap,
+    home_dir: &std::path::Path,
+    repo: &str,
+    active: &[String],
+) -> usize {
+    let db = match store::get_or_open(repo_dbs, home_dir, repo).await {
+        Ok(db) => db,
+        Err(e) => {
+            warn!(repo = %repo, error = %e, "warm: failed to open DB; skipping repo");
+            return 0;
+        }
+    };
+    // DB scan happens here with NO vector_index lock held.
+    let shard = match VectorIndex::load_from_db(&db).await {
+        Ok(vi) => vi,
+        Err(e) => {
+            warn!(repo = %repo, error = %e, "warm: failed to load shard from DB; skipping repo");
+            return 0;
+        }
+    };
+    let count = shard.len();
+    if count == 0 {
+        return 0;
+    }
+    // Short write lock: install the already-built shard. No DB work under the lock.
+    let mut vi = vector_index.write().await;
+    vi.install_shard(repo, shard, active);
+    info!(repo = %repo, count, "warm: installed vector shard");
+    count
+}
+
+/// Boot-time warming: warm repo shards from disk in order until the resident cap
+/// is reached, then stop. Remaining repos are left cold and warmed lazily on
+/// first query. Bounds boot RAM regardless of repo count.
+///
+/// Each repo is installed via `warm_repo_shard`, which itself enforces the cap on
+/// install — so once the cap is hit, further installs simply evict older shards.
+/// To avoid pointless load→evict churn at boot we stop early once the cap is met.
+pub(crate) async fn warm_shards_to_cap(
+    vector_index: &Arc<RwLock<ShardedVectorIndex>>,
     repo_dbs: &RepoDbMap,
     home_dir: &std::path::Path,
     repos: &[String],
-) -> VectorIndex {
-    let mut merged = VectorIndex::new();
+) {
+    let cap_bytes = {
+        // Read the cap without holding the lock across awaits.
+        let vi = vector_index.read().await;
+        vi.resident_cap_bytes()
+    };
     for repo in repos {
-        match store::get_or_open(repo_dbs, home_dir, repo).await {
-            Ok(db) => match VectorIndex::load_from_db(&db).await {
-                Ok(vi) => {
-                    let count = vi.len();
-                    if count > 0 {
-                        merged.merge(vi);
-                        info!(repo = %repo, count, "loaded repo vectors into VectorIndex");
-                    }
-                }
-                Err(e) => {
-                    warn!(repo = %repo, error = %e, "failed to load VectorIndex from DB; skipping repo");
-                }
-            },
-            Err(e) => {
-                warn!(repo = %repo, error = %e, "failed to open DB for VectorIndex load; skipping repo");
-            }
-        }
+        // Pass an empty active set so the cap is enforced STRICTLY: if the
+        // configured repos' shards exceed the cap, warming later repos evicts the
+        // least-recently-warmed earlier ones, keeping resident bytes at or below
+        // the bound. The repo being warmed is protected internally by
+        // install_shard, so it is never the eviction victim of its own warm.
+        warm_repo_shard(vector_index, repo_dbs, home_dir, repo, &[]).await;
     }
-    info!(total = merged.len(), "VectorIndex loaded from DB");
-    merged
+    let (total, resident_bytes) = {
+        let vi = vector_index.read().await;
+        (vi.resident_repo_count(), vi.resident_bytes())
+    };
+    info!(
+        resident_repos = total,
+        resident_bytes,
+        cap_bytes,
+        "boot vector shard warming complete (cap-bounded)"
+    );
 }
 
 /// Restore persisted per-repo status (file count + last-indexed timestamp) from
@@ -219,11 +278,16 @@ impl IndexEngine {
     ) -> Arc<Self> {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel::<IndexTrigger>(256);
 
-        // Start with an empty index so the server can bind immediately. The full
-        // load happens in a background task below and writes into this same Arc
-        // once complete — queries issued before the load completes return no
-        // results rather than blocking startup.
-        let vector_index = Arc::new(RwLock::new(VectorIndex::new()));
+        // Derive the resident-byte cap from settings (MB → bytes). 0 disables the
+        // cap (unbounded — not recommended; kept as an escape hatch).
+        let cap_bytes = settings
+            .vector_resident_cap_mb
+            .saturating_mul(1024 * 1024);
+
+        // Start with an empty sharded index so the server can bind immediately.
+        // Shards are warmed in a background task below (bounded by the cap), and
+        // any not warmed at boot are loaded on first query (background warm).
+        let vector_index = Arc::new(RwLock::new(ShardedVectorIndex::new(cap_bytes)));
 
         // Clone handles needed by the background vector-load task BEFORE they
         // are moved into the engine struct.
@@ -237,6 +301,7 @@ impl IndexEngine {
             repo_locks: Mutex::new(HashMap::new()),
             trigger_tx: trigger_tx.clone(),
             vector_index,
+            warming: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             repo_dbs,
             event_bus: IndexEventBus::new(),
         });
@@ -249,9 +314,10 @@ impl IndexEngine {
             }
         }
 
-        // Spawn a background task that loads the full vector index from all repo
-        // DBs and replaces the initially-empty index once the load is complete.
-        // This lets the HTTP server bind and accept requests immediately.
+        // Spawn a background task that warms per-repo vector shards from disk,
+        // bounded by the resident-byte cap. Repos beyond the cap are left cold and
+        // warmed lazily on first query. This lets the HTTP server bind immediately
+        // and bounds boot-time RAM regardless of how many repos are configured.
         {
             let vector_index_bg = Arc::clone(&engine.vector_index);
             let statuses_bg = Arc::clone(&engine.statuses);
@@ -263,21 +329,7 @@ impl IndexEngine {
                 // updated, so an indexing run that started meanwhile is never clobbered.
                 seed_statuses_from_db(&statuses_bg, &repo_dbs_bg, &home_dir_bg, &repos_bg).await;
 
-                let loaded =
-                    load_repos_vector_index(&repo_dbs_bg, &home_dir_bg, &repos_bg).await;
-                let mut vi = vector_index_bg.write().await;
-                if vi.is_empty() {
-                    let count = loaded.len();
-                    *vi = loaded;
-                    tracing::info!(count, "background vector index load complete");
-                } else {
-                    // A watcher-triggered pipeline run already populated the index;
-                    // merging the DB snapshot would duplicate those rows, so skip the
-                    // wholesale install. The pipeline's own writes are the source of truth.
-                    tracing::info!(
-                        "background vector index load skipped — index already populated by an indexing run"
-                    );
-                }
+                warm_shards_to_cap(&vector_index_bg, &repo_dbs_bg, &home_dir_bg, &repos_bg).await;
             });
         }
 
@@ -364,6 +416,21 @@ impl IndexEngine {
         self.statuses.read().await.get(repo).cloned()
     }
 
+    /// Clear all in-memory index state for a repo after its on-disk index has
+    /// been removed: reset the status counters to default (Idle, 0 files) and
+    /// evict the resident vector shard. The status entry is reset in place — not
+    /// removed — so the existing filesystem watcher registration is preserved and
+    /// a later `register_repo` can't spawn a duplicate watcher.
+    pub async fn clear_repo_index(&self, repo: &str) {
+        {
+            let mut statuses = self.statuses.write().await;
+            if let Some(s) = statuses.get_mut(repo) {
+                *s = RepoStatus::default();
+            }
+        }
+        self.vector_index.write().await.remove_repo(repo);
+    }
+
     async fn get_repo_lock(&self, repo: &str) -> Arc<Mutex<()>> {
         let mut locks = self.repo_locks.lock().await;
         locks
@@ -372,17 +439,128 @@ impl IndexEngine {
             .clone()
     }
 
-    /// Search the in-memory vector index for the top-k most similar chunks.
+    /// Search the resident vector shards for the top-k most similar chunks.
     ///
-    /// This is a read-only, lock-free (read lock) operation. No DB call is
-    /// made — all work happens in-process.
+    /// Fan-out over resident shards + bounded global top-k merge (scores are
+    /// comparable across shards: all L2-normalized cosine). Reads take a write
+    /// lock only because searching also bumps per-repo recency (LRU touch).
+    ///
+    /// Query scope is derived internally: when `repo_filter` is `Some`, scope is
+    /// that single repo; otherwise scope is the engine's configured repo set
+    /// (the `statuses` keys). Any in-scope repo that is NOT resident is treated as
+    /// cold; the engine spawns a NON-BLOCKING background warm for it. The query
+    /// itself never blocks on a disk reload — it returns partial results.
+    ///
+    /// No DB call is made on the hot path — warming happens off-path in a spawned
+    /// task. The search itself runs under a READ lock, so concurrent queries do not
+    /// serialize (recency is bumped via per-shard atomics). Lock order holds: this
+    /// method takes only `vector_index` (read); the spawned warm task takes
+    /// `repo_dbs` then `vector_index` (write), never the reverse.
     pub async fn vector_search(
-        &self,
+        self: &Arc<Self>,
         query_embedding: &[f32],
         top_k: usize,
+        repo_filter: Option<&str>,
     ) -> Vec<SearchResult> {
-        let index = self.vector_index.read().await;
-        index.search(query_embedding, top_k)
+        // Derive scope without holding the vector_index lock.
+        let scope: Vec<String> = match repo_filter {
+            Some(repo) => vec![repo.to_string()],
+            None => {
+                let statuses = self.statuses.read().await;
+                statuses.keys().cloned().collect()
+            }
+        };
+
+        let ShardedSearch { results, cold_repos } = {
+            // READ lock — concurrent searches run in parallel. `search` bumps
+            // per-shard atomic recency stamps under this shared guard.
+            let index = self.vector_index.read().await;
+            index.search(query_embedding, top_k, repo_filter, &scope)
+        }; // read lock dropped HERE — before spawning any warm task
+
+        // Background-warm any cold in-scope repo so subsequent queries hit it.
+        // Non-blocking: the current query already returned partial results above.
+        for repo in cold_repos {
+            let engine = Arc::clone(self);
+            tokio::spawn(async move {
+                engine.warm_repo_deduped(repo).await;
+            });
+        }
+
+        results
+    }
+
+    /// Warm one repo's shard, guaranteeing at most ONE warm in flight per repo.
+    ///
+    /// N queries hitting the same cold repo within its warm window would otherwise
+    /// each spawn a `warm_repo_shard` — each running a full `load_from_db` scan
+    /// (0.4–1.1 GB for a large repo) and contending for the RocksDB handle and the
+    /// vector write lock. The `warming` set is a claim ticket: the first task to
+    /// insert the repo proceeds; the rest return immediately.
+    ///
+    /// The claim is held by a [`WarmTicket`] RAII guard whose `Drop` removes the
+    /// entry, so it is released on ALL exit paths — normal return, the inner
+    /// `warm_repo_shard` error path, a panic unwind, AND tokio task cancellation
+    /// (the spawned future being dropped mid-`.await` at runtime shutdown). A bare
+    /// `remove`-after-await would leak the claim on those abnormal paths and lock
+    /// the repo out of warming for the life of the process.
+    async fn warm_repo_deduped(self: &Arc<Self>, repo: String) {
+        // Claim the ticket. `try_claim` returns None if a warm is already in flight.
+        let _ticket = match WarmTicket::try_claim(&self.warming, repo.clone()) {
+            Some(t) => t,
+            None => return, // a warm for this repo is already running
+        };
+        // Warm with an empty active set: the cap may freely evict LRU shards to make
+        // room. In-flight searches are NOT at risk — they hold a read guard and
+        // return owned results (cloned ChunkIds); install/evict take the write guard
+        // afterwards. The warmed repo is protected internally by install_shard.
+        //
+        // `_ticket` is dropped at the end of this scope (or on any unwind/cancel),
+        // releasing the claim — no explicit remove needed.
+        warm_repo_shard(
+            &self.vector_index,
+            &self.repo_dbs,
+            &self.home_dir,
+            &repo,
+            &[],
+        )
+        .await;
+    }
+}
+
+/// RAII claim on the per-repo "warm in flight" ticket. Holding one means this task
+/// owns the right to warm `repo`; dropping it (normal, panic, or cancellation)
+/// removes the entry from the shared `warming` set so a later query can re-warm.
+struct WarmTicket {
+    warming: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    repo: String,
+}
+
+impl WarmTicket {
+    /// Attempt to claim the warm ticket for `repo`. Returns `Some(ticket)` if no
+    /// warm was in flight (the entry was inserted), or `None` if one already is.
+    fn try_claim(
+        warming: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        repo: String,
+    ) -> Option<Self> {
+        let mut set = warming.lock().unwrap_or_else(|e| e.into_inner());
+        if set.insert(repo.clone()) {
+            Some(Self {
+                warming: Arc::clone(warming),
+                repo,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for WarmTicket {
+    fn drop(&mut self) {
+        // Release on every path. Recover from a poisoned mutex (a prior panic while
+        // the lock was held) so a panic never permanently strands the ticket.
+        let mut set = self.warming.lock().unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.repo);
     }
 }
 
@@ -573,9 +751,13 @@ mod load_repos_tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Seed `n` chunk rows (each with a non-empty 4-d embedding) into `repo`'s DB.
-    async fn seed_repo(home: &std::path::Path, repo: &str, n: usize) {
-        let db = store::open_db(home, repo).await.expect("open_db");
+    /// Seed `n` chunk rows (each with a non-empty 4-d embedding) into `repo`'s DB,
+    /// writing THROUGH the shared `repo_dbs` map (one cached handle per repo, like
+    /// production). RocksDB holds an exclusive per-directory lock, so a second
+    /// uncached `open_db` on the same path would deadlock on the lock file —
+    /// seeding through `get_or_open` keeps a single handle, mirroring real usage.
+    async fn seed_repo(repo_dbs: &RepoDbMap, home: &std::path::Path, repo: &str, n: usize) {
+        let db = store::get_or_open(repo_dbs, home, repo).await.expect("get_or_open");
         for i in 0..n {
             let q = format!(
                 "CREATE chunk SET file = '{repo}/f{i}.rs', line_start = 1, line_end = 2, \
@@ -585,29 +767,45 @@ mod load_repos_tests {
         }
     }
 
-    /// Startup must load EVERY configured repo, not just the first.
-    /// Two repos seeded with 1 and 2 chunks → merged index must hold all 3.
-    /// Fails under the `.first()` / `take(1)` regression (would yield 1).
+    /// Startup must warm EVERY configured repo into its own resident shard (when
+    /// the cap allows), not just the first. Two repos seeded with 1 and 2 chunks →
+    /// both shards resident, total 3 vectors searchable across shards.
     #[tokio::test]
     async fn loads_all_repos_not_just_first() {
         let home = TempDir::new().expect("tempdir");
         let repo_one = "/proj/repo_one".to_string();
         let repo_two = "/proj/repo_two".to_string();
 
-        seed_repo(home.path(), &repo_one, 1).await;
-        seed_repo(home.path(), &repo_two, 2).await;
-
+        // Shared map used for BOTH seeding and warming — exactly one handle per repo.
         let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
-        let index =
-            load_repos_vector_index(&repo_dbs, home.path(), &[repo_one, repo_two]).await;
+        seed_repo(&repo_dbs, home.path(), &repo_one, 1).await;
+        seed_repo(&repo_dbs, home.path(), &repo_two, 2).await;
 
-        // 1 (repo_one) + 2 (repo_two) = 3. Under take(1) this would be 1.
-        assert_eq!(index.len(), 3, "expected all repos merged, not just the first");
+        // Large cap so both repos stay resident after warming.
+        let vector_index = Arc::new(RwLock::new(ShardedVectorIndex::new(1024 * 1024 * 1024)));
+        warm_shards_to_cap(
+            &vector_index,
+            &repo_dbs,
+            home.path(),
+            &[repo_one.clone(), repo_two.clone()],
+        )
+        .await;
+
+        let vi = vector_index.read().await;
+        assert!(vi.is_resident(&repo_one), "repo_one shard must be resident");
+        assert!(vi.is_resident(&repo_two), "repo_two shard must be resident");
+        assert_eq!(
+            vi.resident_repo_count(),
+            2,
+            "expected both repos warmed into shards, not just the first"
+        );
     }
 
-    /// Seed `n` file_meta rows for `repo` so count_indexed_files returns `n`.
-    async fn seed_file_meta(home: &std::path::Path, repo: &str, n: usize) {
-        let db = store::open_db(home, repo).await.expect("open_db");
+    /// Seed `n` file_meta rows for `repo`, writing through the shared `repo_dbs`
+    /// map (single cached handle per repo — see [`seed_repo`] for why RocksDB
+    /// requires this).
+    async fn seed_file_meta(repo_dbs: &RepoDbMap, home: &std::path::Path, repo: &str, n: usize) {
+        let db = store::get_or_open(repo_dbs, home, repo).await.expect("get_or_open");
         for i in 0..n {
             let q = format!(
                 "CREATE file_meta SET path = '{repo}/f{i}.rs', mtime = 0, size = 1, \
@@ -626,9 +824,11 @@ mod load_repos_tests {
         let indexed = "/proj/indexed".to_string();
         let empty = "/proj/empty".to_string();
 
-        seed_file_meta(home.path(), &indexed, 5).await;
-        // `empty` gets a DB but no file_meta rows.
-        let _ = store::open_db(home.path(), &empty).await.expect("open_db");
+        // Shared map for seeding AND the seed-status call — one handle per repo.
+        let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
+        seed_file_meta(&repo_dbs, home.path(), &indexed, 5).await;
+        // `empty` gets a DB (cached) but no file_meta rows.
+        let _ = store::get_or_open(&repo_dbs, home.path(), &empty).await.expect("get_or_open");
 
         let statuses: Arc<RwLock<HashMap<String, RepoStatus>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -638,7 +838,6 @@ mod load_repos_tests {
             m.insert(empty.clone(), RepoStatus::default());
         }
 
-        let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
         seed_statuses_from_db(&statuses, &repo_dbs, home.path(), &[indexed.clone(), empty.clone()])
             .await;
 
@@ -653,7 +852,8 @@ mod load_repos_tests {
     async fn seed_does_not_clobber_live_run() {
         let home = TempDir::new().expect("tempdir");
         let repo = "/proj/live".to_string();
-        seed_file_meta(home.path(), &repo, 5).await;
+        let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
+        seed_file_meta(&repo_dbs, home.path(), &repo, 5).await;
 
         let statuses: Arc<RwLock<HashMap<String, RepoStatus>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -665,11 +865,45 @@ mod load_repos_tests {
             );
         }
 
-        let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
         seed_statuses_from_db(&statuses, &repo_dbs, home.path(), &[repo.clone()]).await;
 
         let m = statuses.read().await;
         assert_eq!(m[&repo].state, IndexState::Indexing, "in-flight run must survive the seed");
         assert_eq!(m[&repo].indexed_files, 0, "seed must not overwrite a live run's numerator");
+    }
+
+    /// WarmTicket is an exclusive RAII claim: a second `try_claim` for the same
+    /// repo is refused while the first ticket is alive, and dropping the first
+    /// (which is what happens on normal return, panic unwind, OR tokio task
+    /// cancellation) releases the claim so a later warm can re-acquire it. This is
+    /// the guarantee that a dropped/aborted warm task never strands a repo.
+    #[test]
+    fn warm_ticket_releases_on_drop_and_is_exclusive() {
+        let warming: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let repo = "/proj/warm".to_string();
+
+        {
+            let t1 = WarmTicket::try_claim(&warming, repo.clone());
+            assert!(t1.is_some(), "first claim must succeed");
+            // While t1 is alive, a second claim for the same repo is refused.
+            assert!(
+                WarmTicket::try_claim(&warming, repo.clone()).is_none(),
+                "second concurrent claim must be refused"
+            );
+            assert!(warming.lock().unwrap().contains(&repo), "repo must be marked in-flight");
+            // t1 dropped at end of scope — simulates the spawned task finishing,
+            // unwinding, or being cancelled.
+        }
+
+        assert!(
+            !warming.lock().unwrap().contains(&repo),
+            "dropping the ticket must release the claim (no permanent dead state)"
+        );
+        // A fresh claim now succeeds — the repo can be re-warmed.
+        assert!(
+            WarmTicket::try_claim(&warming, repo.clone()).is_some(),
+            "after release, a new warm must be claimable"
+        );
     }
 }

@@ -909,7 +909,7 @@ mod silent_rollback_proof {
     use crate::store::open_db;
     use tempfile::TempDir;
 
-    /// Open a fresh in-memory-equivalent SurrealKv DB in a tempdir with the
+    /// Open a fresh RocksDB-backed DB in a tempdir with the
     /// real schema applied, returning it ready for writes.
     async fn open_test_db(home: &TempDir, repo: &str) -> Surreal<surrealdb::engine::local::Db> {
         open_db(home.path(), repo).await.expect("open test db")

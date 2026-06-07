@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use surrealdb::Surreal;
-use surrealdb::engine::local::{Db, SurrealKv};
+use surrealdb::engine::local::{Db, RocksDb};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -44,12 +44,18 @@ pub fn sanitize_repo_name(repo_path: &str) -> String {
 }
 
 /// Return the SurrealDB data directory for a given repo.
+///
+/// Namespaced under `rocksdb/` (not the legacy `surreal/` SurrealKV path). The
+/// backend swap from SurrealKV to RocksDB changes the on-disk format, so the old
+/// `surreal/<name>` directories are intentionally left untouched for rollback; a
+/// repo opened here for the first time has no file_meta and triggers a full
+/// rebuild via the pipeline's is_first_run path (embedding cache makes it API-free).
 pub fn db_path(home_dir: &Path, repo_path: &str) -> PathBuf {
     let name = sanitize_repo_name(repo_path);
     home_dir
         .join(".vibervn")
         .join("context-engine")
-        .join("surreal")
+        .join("rocksdb")
         .join(name)
 }
 
@@ -69,7 +75,7 @@ pub async fn open_db(home_dir: &Path, repo_path: &str) -> Result<Surreal<Db>> {
     let path = db_path(home_dir, repo_path);
     std::fs::create_dir_all(&path).with_context(|| format!("create db dir {:?}", path))?;
 
-    let db = Surreal::new::<SurrealKv>(path.to_str().unwrap())
+    let db = Surreal::new::<RocksDb>(path.to_str().unwrap())
         .await
         .context("open surrealdb")?;
 
@@ -464,53 +470,45 @@ mod isolation_repro {
     use super::*;
     use tempfile::TempDir;
 
+    /// RocksDB takes an EXCLUSIVE per-directory lock, so two independent handles on
+    /// the same on-disk path cannot coexist — a second open fails on the LOCK file.
+    /// This makes the shared `get_or_open` cache (one handle per repo) the mandatory
+    /// access pattern, not merely an optimization. This test proves both halves:
+    /// (1) a second raw `open_db` is rejected while a cached handle is alive;
+    /// (2) the shared cached handle reads its own writes correctly.
+    ///
+    /// Note: we do NOT drop-then-reopen — SurrealDB releases the RocksDB lock
+    /// asynchronously (the datastore lives in a background task past handle drop),
+    /// so an immediate reopen in-process would race the lock. Production never
+    /// drops+reopens; `get_or_open` keeps exactly one cached handle for the repo's
+    /// lifetime, which is precisely what this test exercises.
     #[tokio::test]
-    async fn concurrent_handles_isolation_then_shared_fix() {
-        // ── PART 1: does isolation exist? ────────────────────────────────────
+    async fn exclusive_lock_then_shared_handle_works() {
         let home = TempDir::new().unwrap();
         let repo = "/proj/repo_iso";
 
-        // Open handle A (fresh DB).
-        let a = open_db(home.path(), repo).await.expect("open A");
+        // The shared cache opens the single authoritative handle.
+        let map: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
+        let sa = get_or_open(&map, home.path(), repo).await.expect("shared A");
         assert_eq!(
-            ops::count_chunks(&a).await.unwrap(),
+            ops::count_chunks(&sa).await.unwrap(),
             0,
             "fresh DB must be empty"
         );
 
-        // Open handle B on the SAME on-disk path while A is still alive.
-        let b = open_db(home.path(), repo).await.expect("open B");
-
-        // Write+commit one chunk through B.
-        b.query(
-            "CREATE chunk SET file = '/x/f.rs', line_start = 1, line_end = 2, \
-             content = 'x', embedding = [0.1, 0.2, 0.3, 0.4], symbol_ref = NONE;",
-        )
-        .await
-        .expect("write chunk via B");
-
-        // B must see its own write — if not, the experiment is invalid.
-        assert_eq!(
-            ops::count_chunks(&b).await.unwrap(),
-            1,
-            "B must see its own write (write failed if this is 0)"
+        // ── PART 1: a second RAW open on the same live path must be rejected ────
+        // (Under the old SurrealKV backend this silently succeeded with isolated
+        // state — the root of the original cross-handle bug. RocksDB's exclusive
+        // lock structurally prevents it.)
+        let raw_result = open_db(home.path(), repo).await;
+        assert!(
+            raw_result.is_err(),
+            "RocksDB must reject a second concurrent handle on the same path (exclusive lock)"
         );
 
-        // Re-query the still-open A — does it see B's commit?
-        let a_after = ops::count_chunks(&a).await.unwrap();
-        println!(
-            "ISOLATION PROBE: A reads {a_after} after B committed 1 \
-             (0 => isolation confirmed, 1 => no isolation / hypothesis WRONG)"
-        );
-
-        // ── PART 2: does the shared handle (the proposed fix) work? ──────────
-        let map: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
-
-        // Both calls resolve to the SAME cached instance.
-        let sa = get_or_open(&map, home.path(), repo).await.expect("shared A");
+        // ── PART 2: the shared cached handle reads its own writes ───────────────
+        // A second get_or_open returns the SAME cached instance (no new lock).
         let sb = get_or_open(&map, home.path(), repo).await.expect("shared B");
-
-        // Write another chunk through sb (total on disk will be 2 after this).
         sb.query(
             "CREATE chunk SET file = '/x/f.rs', line_start = 3, line_end = 4, \
              content = 'y', embedding = [0.5, 0.6, 0.7, 0.8], symbol_ref = NONE;",
@@ -519,24 +517,9 @@ mod isolation_repro {
         .expect("write chunk via shared B");
 
         let sa_after = ops::count_chunks(&sa).await.unwrap();
-        println!(
-            "SHARED PROBE: shared-A reads {sa_after} after shared-B committed another chunk"
-        );
-
-        // ── Assertions ───────────────────────────────────────────────────────
-        assert_eq!(
-            a_after,
-            0,
-            "EXPECTED isolation: a still-open separate handle must NOT see another instance's \
-             commit. If this fails (A == 1), the isolation hypothesis is WRONG and the real bug \
-             is elsewhere (read-path ns/db context)."
-        );
-
-        // sa and sb are the same cached instance; part 1 left 1 chunk on disk,
-        // part 2 wrote 1 more through the shared instance → shared-A should see 2.
         assert_eq!(
             sa_after,
-            2,
+            1,
             "shared handle must see writes made through the same cached instance"
         );
     }
@@ -565,7 +548,7 @@ mod isolation_repro {
 #[cfg(test)]
 mod stale_schema {
     use surrealdb::Surreal;
-    use surrealdb::engine::local::{Db, SurrealKv};
+    use surrealdb::engine::local::{Db, RocksDb};
     use tempfile::TempDir;
 
     use crate::store::schema::SCHEMA_DDL;
@@ -576,7 +559,7 @@ mod stale_schema {
     async fn open_raw_db(dir: &std::path::Path, name: &str) -> Surreal<Db> {
         let path = dir.join(name);
         std::fs::create_dir_all(&path).unwrap();
-        let db = Surreal::new::<SurrealKv>(path.to_str().unwrap())
+        let db = Surreal::new::<RocksDb>(path.to_str().unwrap())
             .await
             .expect("open raw db");
         db.use_ns("context_engine").use_db(name).await.expect("ns/db");
@@ -853,7 +836,7 @@ mod schemaless_tests {
     async fn open_raw(dir: &std::path::Path, name: &str) -> Surreal<Db> {
         let path = dir.join(name);
         std::fs::create_dir_all(&path).unwrap();
-        let db = Surreal::new::<SurrealKv>(path.to_str().unwrap())
+        let db = Surreal::new::<RocksDb>(path.to_str().unwrap())
             .await
             .expect("open raw db");
         db.use_ns("context_engine").use_db(name).await.expect("ns/db");

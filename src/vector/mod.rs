@@ -6,6 +6,9 @@ use tracing::info;
 
 use crate::path_in_repo;
 
+pub mod sharded;
+pub use sharded::{ShardedSearch, ShardedVectorIndex};
+
 // ─── Public types ─────────────────────────────────────────────────────────
 
 /// Identifies a chunk by its location in the source tree.
@@ -260,6 +263,18 @@ impl VectorIndex {
         self.embeddings.clear();
         self.chunk_ids.clear();
         self.dim = 0;
+    }
+
+    /// Total bytes occupied by the stored vector data.
+    ///
+    /// This is the resident-cap accounting metric: it counts ONLY the flat f32
+    /// embedding storage (`len * 4`), which is the dominant and predictable term
+    /// and matches the contract's "total resident vector bytes" definition. The
+    /// `chunk_ids` bookkeeping is comparatively negligible and intentionally
+    /// excluded so the cap maps cleanly to embedding payload.
+    #[inline]
+    pub fn byte_size(&self) -> usize {
+        self.embeddings.len() * std::mem::size_of::<f32>()
     }
 }
 

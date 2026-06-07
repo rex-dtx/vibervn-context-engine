@@ -26,7 +26,7 @@ use crate::store::ops::{
     FileMeta, delete_all_data, delete_files_data_bulk, get_all_file_meta,
     get_meta, set_meta, upsert_file_meta, find_symbols_by_names_with_pos, SymbolWithPos,
 };
-use crate::vector::{ChunkId, VectorIndex};
+use crate::vector::{ChunkId, ShardedVectorIndex};
 
 /// Batch size for DB writes — keeps per-query payload small and avoids the
 /// gigabyte-sized transaction that caused 3 GB RAM spikes on large repos.
@@ -280,7 +280,7 @@ impl IndexPipeline {
         db: &Surreal<Db>,
         changes: Option<Vec<FileChange>>,
         force_rebuild: bool,
-        vector_index: Option<&tokio::sync::RwLock<VectorIndex>>,
+        vector_index: Option<&tokio::sync::RwLock<ShardedVectorIndex>>,
         progress: Option<ProgressHandle>,
         event_bus: Option<&IndexEventBus>,
         key_hints: &[String],
@@ -311,8 +311,11 @@ impl IndexPipeline {
             let (new_vectors, stage_stats) = self.full_rebuild(db, progress.as_ref(), event_bus, key_hints).await?;
             if let Some(vi) = vector_index {
                 let mut guard = vi.write().await;
-                guard.remove_repo(&self.repo);
-                guard.insert(&new_vectors);
+                // Empty active set: the cap may evict LRU shards to honor the
+                // bound. The repo being (re)built is protected internally by
+                // replace_repo → install_shard. Query safety is guaranteed by the
+                // shared write lock, not the active set.
+                guard.replace_repo(&self.repo, &new_vectors, &[]);
             }
             let indexed = get_all_file_meta(db, &self.repo).await?.len() as u64;
             info!(
@@ -418,8 +421,7 @@ impl IndexPipeline {
                     let (new_vectors, stage_stats) = self.full_rebuild(db, None, event_bus, key_hints).await?;
                     if let Some(vi) = vector_index {
                         let mut guard = vi.write().await;
-                        guard.remove_repo(&self.repo);
-                        guard.insert(&new_vectors);
+                        guard.replace_repo(&self.repo, &new_vectors, &[]);
                     }
                     let indexed = get_all_file_meta(db, &self.repo).await?.len() as u64;
                     let total_files = stored_meta.len() as u64;
@@ -457,10 +459,9 @@ impl IndexPipeline {
 
         if let Some(vi) = vector_index {
             let mut guard = vi.write().await;
-            for file in &removed_files {
-                guard.remove_file(file);
-            }
-            guard.insert(&new_vectors);
+            // Empty active set — see replace_repo call above for the rationale.
+            // apply_incremental protects `self.repo` internally.
+            guard.apply_incremental(&self.repo, &removed_files, &new_vectors, &[]);
         }
 
         let indexed = get_all_file_meta(db, &self.repo).await?.len() as u64;

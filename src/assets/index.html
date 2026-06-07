@@ -864,8 +864,11 @@ function renderRepos() {
         }
       } catch (err) {
         showError('Network error: ' + err.message);
+      } finally {
+        btn.textContent = 'Remove Indexes';
+        btn.disabled = false;
+        btn.closest('.remove-dropdown').classList.add('hidden');
       }
-      btn.closest('.remove-dropdown').classList.add('hidden');
       await pollIndexStatus();
     });
   });

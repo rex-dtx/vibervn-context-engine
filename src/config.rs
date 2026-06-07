@@ -24,8 +24,17 @@ pub const MIGRATIONS: &[MigrationFn] = &[];
 fn default_embed_concurrency() -> usize {
     // Per-key concurrency: each API key is allowed this many concurrent
     // embedding batches in-flight. Runtime total = this value × number of
-    // keys. Default 16. Override via CORBELL_EMBED_CONCURRENCY env var.
+    // keys. Default 16.
     16
+}
+
+fn default_vector_resident_cap_mb() -> usize {
+    // Resident-byte cap for the per-repo sharded vector index, in megabytes.
+    // Total resident embedding bytes across all repo shards are kept at or below
+    // this; least-recently-used non-active repos are evicted when an insert/warm
+    // would exceed it. Cold repos are warmed lazily on query. 0 disables the cap
+    // (unbounded — not recommended). Default 2048 MB (~2 GB).
+    2048
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -35,7 +44,7 @@ pub struct EmbeddingConfig {
     pub api_keys: Vec<String>,
     /// Per-key concurrency: number of embedding batches in-flight per API key.
     /// Runtime total in-flight batches = embed_concurrency × api_keys.len().
-    /// Defaults to 16. Override via CORBELL_EMBED_CONCURRENCY env var.
+    /// Defaults to 16.
     #[serde(default = "default_embed_concurrency")]
     pub embed_concurrency: usize,
 }
@@ -103,6 +112,11 @@ pub struct Settings {
     /// considered stale for MCP freshness checks.
     #[serde(default = "default_mcp_stale_after_days")]
     pub mcp_stale_after_days: u64,
+    /// Resident-byte cap for the per-repo sharded vector index, in megabytes.
+    /// Bounds in-RAM embedding storage across all repos; LRU-evicts non-active
+    /// repos when exceeded. 0 disables the cap. Defaults to 2048 (~2 GB).
+    #[serde(default = "default_vector_resident_cap_mb")]
+    pub vector_resident_cap_mb: usize,
 }
 
 impl Default for Settings {
@@ -114,6 +128,7 @@ impl Default for Settings {
             llm: LlmConfig::default(),
             mcp_index_wait_secs: default_mcp_index_wait_secs(),
             mcp_stale_after_days: default_mcp_stale_after_days(),
+            vector_resident_cap_mb: default_vector_resident_cap_mb(),
         }
     }
 }

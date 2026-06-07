@@ -338,11 +338,15 @@ async fn delete_repo_index(
 
     let db_dir = store::db_path(&state.home_dir, &repo);
     if !db_dir.exists() {
+        state.index_engine.clear_repo_index(&repo).await;
         return Json(json!({ "status": "ok", "message": "no index to remove" })).into_response();
     }
 
     match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&db_dir)).await {
-        Ok(Ok(())) => Json(json!({ "status": "ok" })).into_response(),
+        Ok(Ok(())) => {
+            state.index_engine.clear_repo_index(&repo).await;
+            Json(json!({ "status": "ok" })).into_response()
+        }
         Ok(Err(e)) => {
             let body = json!({ "error": format!("failed to remove index directory: {e}") });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
@@ -584,13 +588,13 @@ async fn post_query(
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
 
-    {
-        let vi = state.index_engine.vector_index.read().await;
-        if vi.is_empty() {
-            let body = json!({ "error": "Index is empty. Trigger indexing first." });
-            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-        }
-    }
+    // NOTE: we intentionally do NOT reject on an empty resident vector index here.
+    // Under per-repo sharding with lazy warming, a repo that IS indexed on disk can
+    // be momentarily cold (not yet warmed into RAM) — its shard reads empty. The
+    // query path handles this correctly: it returns partial (possibly empty) results
+    // and spawns a background warm, so the next query hits the now-resident shard.
+    // A hard "index is empty" rejection here would falsely block queries to
+    // populated-but-cold repos. Truly-unindexed setups simply return no results.
 
     if settings.embedding.api_keys.is_empty() {
         let body = json!({ "error": "No embedding API keys configured." });

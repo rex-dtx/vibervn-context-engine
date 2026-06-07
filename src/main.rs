@@ -19,8 +19,50 @@ struct Cli {
     bind: Option<String>,
 }
 
+/// Pin bounded RocksDB memory settings unless the operator has overridden them.
+///
+/// SurrealDB's RocksDB layer reads these `SURREAL_ROCKSDB_*` env vars once (via
+/// `LazyLock`) the first time a datastore opens, so they MUST be set before any
+/// `Surreal::new::<RocksDb>` call. The defaults below are repo-count-stable:
+/// - BLOCK_CACHE_SIZE: a single modest shared LRU cache (128 MiB) instead of the
+///   RAM-derived ~31 GiB default. The cache is lazy (fills as blocks are read),
+///   but the default ceiling is far too high for an always-on local server, and
+///   the hot query path reads vectors from the in-memory shards, not RocksDB.
+/// - WRITE_BUFFER_SIZE × MAX_WRITE_BUFFER_NUMBER: small per-DB write buffers
+///   (32 MiB × 2 = 64 MiB/DB) instead of up to 1 GiB/DB. This is the dominant
+///   per-repo term; pinning it keeps total RAM bounded as repo count grows.
+/// - ENABLE_BLOB_FILES off-default blob sizes are left alone; embeddings live in
+///   the vector shards, not re-read from RocksDB on the hot path.
+fn set_rocksdb_memory_bounds() {
+    // (var, default) — only applied when unset, so explicit overrides win.
+    let bounds = [
+        ("SURREAL_ROCKSDB_BLOCK_CACHE_SIZE", "134217728"), // 128 MiB shared LRU
+        ("SURREAL_ROCKSDB_WRITE_BUFFER_SIZE", "33554432"), // 32 MiB per buffer
+        ("SURREAL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER", "2"),  // 2 buffers/DB → 64 MiB/DB
+    ];
+    for (key, default) in bounds {
+        if std::env::var_os(key).is_none() {
+            // SAFETY: set at the very top of main(), before any other thread is
+            // spawned (tokio worker threads and the DB layer start after this).
+            unsafe {
+                std::env::set_var(key, default);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    // Bound RocksDB memory BEFORE any datastore opens. SurrealDB derives its
+    // RocksDB defaults from total system RAM and applies the write buffers PER
+    // database: on a 64 GiB host the block cache defaults to ~31 GiB and each DB
+    // gets up to 128 MiB × 8 = 1 GiB of write buffers. With one DB per repo this
+    // reintroduces unbounded per-repo growth (axis 1). We pin small, repo-count-
+    // stable values so total RocksDB RAM stays bounded no matter how many repos
+    // are configured. Each var is only set if the operator has NOT overridden it,
+    // so power users keep full control.
+    set_rocksdb_memory_bounds();
+
     // Initialise tracing subscriber — reads RUST_LOG env var for filtering.
     tracing_subscriber::fmt()
         .with_env_filter(
