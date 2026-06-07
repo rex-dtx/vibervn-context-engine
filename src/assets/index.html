@@ -333,6 +333,28 @@
           </button>
         </form>
       </section>
+
+      <!-- MCP Tools -->
+      <section class="mb-8">
+        <h2 data-i18n="settings.mcpTools" class="font-serif text-xl text-gray-800 dark:text-wiki-heading mb-4">MCP Tools</h2>
+        <p data-i18n="settings.mcpToolsHelp" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
+          Choose which MCP tools are exposed to clients. Disabled tools are hidden from tool lists.
+        </p>
+        <div class="space-y-2">
+          <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-wiki-text cursor-pointer">
+            <input id="mcp-tool-codebase-retrieval" type="checkbox" checked
+                   class="h-4 w-4 rounded border-gray-300 dark:border-wiki-border text-blue-600
+                          focus:outline-none focus:ring-2 focus:ring-blue-400" />
+            <span>codebase-retrieval</span>
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-wiki-text cursor-pointer">
+            <input id="mcp-tool-file-retrieval" type="checkbox" checked
+                   class="h-4 w-4 rounded border-gray-300 dark:border-wiki-border text-blue-600
+                          focus:outline-none focus:ring-2 focus:ring-blue-400" />
+            <span>file-retrieval</span>
+          </label>
+        </div>
+      </section>
     </div>
 
     <!-- Tab: MCP -->
@@ -422,6 +444,16 @@
         <div class="space-y-3 mb-4">
           <div>
             <label class="block text-xs font-medium text-gray-500 dark:text-wiki-text-muted mb-1"
+                   for="mcp-test-tool-select">tool</label>
+            <select id="mcp-test-tool-select"
+                    class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface text-gray-900 dark:text-wiki-text rounded px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active">
+              <option value="codebase-retrieval">codebase-retrieval</option>
+              <option value="file-retrieval">file-retrieval</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-500 dark:text-wiki-text-muted mb-1"
                    for="mcp-test-query">information_request</label>
             <textarea id="mcp-test-query" rows="3"
                       placeholder="e.g. Where is authentication handled?" data-i18n-ph="mcp.testQueryPlaceholder"
@@ -437,6 +469,14 @@
                            focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active"></select>
             <input id="mcp-test-workspace" type="text" placeholder="/absolute/path/to/repo" data-i18n-ph="repos.placeholder"
                    class="hidden w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface text-gray-900 dark:text-wiki-text rounded px-3 py-2 text-sm
+                          placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted
+                          focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />
+          </div>
+          <div id="mcp-test-file-path-group" class="hidden">
+            <label class="block text-xs font-medium text-gray-500 dark:text-wiki-text-muted mb-1"
+                   for="mcp-test-file-path">file_path</label>
+            <input id="mcp-test-file-path" type="text" placeholder="src/main.rs"
+                   class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface text-gray-900 dark:text-wiki-text rounded px-3 py-2 text-sm
                           placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted
                           focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />
           </div>
@@ -856,6 +896,8 @@ const STR = {
                          vi: `Yêu cầu output JSON gốc của provider để rerank thay vì thẻ XML. Provider không hỗ trợ JSON sẽ tự động dùng đường XML.`,
                          zh: `请求提供商的原生 JSON 输出用于重排序，而非 XML 标签。不支持 JSON 模式的提供商会自动回退到 XML 方式。` },
   'settings.setupHint':{ en: `Add an embedding API key below to start indexing repositories.`, vi: `Thêm embedding API key bên dưới để bắt đầu index repo.`, zh: `在下方添加嵌入 API 密钥即可开始索引仓库。` },
+  'settings.mcpTools': { en: `MCP Tools`, vi: `MCP Tools`, zh: `MCP 工具` },
+  'settings.mcpToolsHelp': { en: `Choose which MCP tools are exposed to clients. Disabled tools are hidden from tool lists.`, vi: `Chọn MCP tool nào được expose cho client. Tool bị tắt sẽ ẩn khỏi danh sách tool.`, zh: `选择向客户端公开哪些 MCP 工具。禁用的工具将从工具列表中隐藏。` },
 
   // MCP
   'mcp.endpoint':      { en: `Endpoint`, vi: `Endpoint`, zh: `端点` },
@@ -1412,6 +1454,10 @@ function renderAll() {
     saveNow();
   });
   document.getElementById('banner-setup').classList.toggle('hidden', !needsSetup());
+  // MCP tools checkboxes
+  const enabledTools = cfg.enabled_mcp_tools || ['codebase-retrieval', 'file-retrieval'];
+  document.getElementById('mcp-tool-codebase-retrieval').checked = enabledTools.includes('codebase-retrieval');
+  document.getElementById('mcp-tool-file-retrieval').checked = enabledTools.includes('file-retrieval');
 }
 
 function escHtml(str) {
@@ -1565,6 +1611,17 @@ document.getElementById('llm-min-prune-lines').addEventListener('input', (e) => 
 document.getElementById('llm-use-structured-output').addEventListener('change', (e) => {
   if (cfg) { cfg.llm.use_structured_output = e.target.checked; saveNow(); }
 });
+function syncEnabledMcpTools() {
+  if (!cfg) return;
+  const tools = [];
+  if (document.getElementById('mcp-tool-codebase-retrieval').checked) tools.push('codebase-retrieval');
+  if (document.getElementById('mcp-tool-file-retrieval').checked) tools.push('file-retrieval');
+  cfg.enabled_mcp_tools = tools;
+  saveNow();
+  document.getElementById('mcp-claude-md').textContent = buildClaudeMdSnippet();
+}
+document.getElementById('mcp-tool-codebase-retrieval').addEventListener('change', syncEnabledMcpTools);
+document.getElementById('mcp-tool-file-retrieval').addEventListener('change', syncEnabledMcpTools);
 document.getElementById('embedding-provider').addEventListener('change', (e) => {
   if (cfg) { cfg.embedding.provider = e.target.value; saveNow(); }
 });
@@ -1649,13 +1706,23 @@ function closeRepoSearch() {
 document.getElementById('btn-search-back').addEventListener('click', closeRepoSearch);
 
 // ─── MCP tab init (populate URLs when the MCP tab is shown) ──────────────
-const CLAUDE_MD_SNIPPET = [
-  '# CLAUDE.md',
-  '',
-  'This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.',
-  '',
-  'When asked about the codebase, project structure, or to find code, always use the context-engine MCP tool (codebase-retrieval) in the root workspace first before reading individual files. Use `codebase-retrieval` instead of the Explore subagent for codebase exploration and search tasks.'
-].join('\n');
+function buildClaudeMdSnippet() {
+  const enabled = (cfg && cfg.enabled_mcp_tools) || ['codebase-retrieval', 'file-retrieval'];
+  const lines = [
+    '# CLAUDE.md',
+    '',
+    'This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.',
+  ];
+  if (enabled.includes('codebase-retrieval')) {
+    lines.push('');
+    lines.push('When asked about the codebase, project structure, or to find code, always use the context-engine MCP tool (codebase-retrieval) in the root workspace first before reading individual files. Use `codebase-retrieval` instead of the Explore subagent for codebase exploration and search tasks.');
+  }
+  if (enabled.includes('file-retrieval')) {
+    lines.push('');
+    lines.push('When you need to read a specific file but don\'t know the exact line range, use the file-retrieval MCP tool instead of reading the entire file. Describe what information you need and it returns only the relevant snippets with line numbers. Use the Read tool with the returned line ranges (expanded as needed) to get current content before making edits.');
+  }
+  return lines.join('\n');
+}
 
 function initMcpUrls() {
   const origin = window.location.origin;
@@ -1664,7 +1731,7 @@ function initMcpUrls() {
 
   document.getElementById('mcp-endpoint-url').textContent = endpointUrl;
   document.getElementById('mcp-claude-cmd').textContent = claudeCmd;
-  document.getElementById('mcp-claude-md').textContent = CLAUDE_MD_SNIPPET;
+  document.getElementById('mcp-claude-md').textContent = buildClaudeMdSnippet();
 
   initMcpWorkspaceChoices();
 }
@@ -1770,6 +1837,11 @@ makeCopyBtn('btn-copy-claude',   () => document.getElementById('mcp-claude-cmd')
 makeCopyBtn('btn-copy-claude-md', () => document.getElementById('mcp-claude-md').textContent);
 
 // Run the MCP test tool call.
+// Toggle file_path field visibility based on selected tool.
+document.getElementById('mcp-test-tool-select').addEventListener('change', (e) => {
+  document.getElementById('mcp-test-file-path-group').classList.toggle('hidden', e.target.value !== 'file-retrieval');
+});
+
 async function runMcpTest() {
   const btn = document.getElementById('btn-mcp-run');
   const errorEl = document.getElementById('mcp-test-error');
@@ -1779,6 +1851,7 @@ async function runMcpTest() {
   const workspace = (wsSelect && wsSelect.value === '__custom__')
     ? document.getElementById('mcp-test-workspace').value.trim()
     : (wsSelect ? wsSelect.value.trim() : document.getElementById('mcp-test-workspace').value.trim());
+  const tool = document.getElementById('mcp-test-tool-select').value;
 
   errorEl.classList.add('hidden');
   outputEl.classList.add('hidden');
@@ -1786,10 +1859,16 @@ async function runMcpTest() {
   btn.textContent = t('mcp.running');
 
   try {
-    const res = await fetch('/api/mcp-tool', {
+    let url = '/api/mcp-tool';
+    let body = { information_request: query, workspace_full_path: workspace };
+    if (tool === 'file-retrieval') {
+      url = '/api/mcp-tool/file-retrieval';
+      body.file_path = document.getElementById('mcp-test-file-path').value.trim();
+    }
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ information_request: query, workspace_full_path: workspace }),
+      body: JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {

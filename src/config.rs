@@ -9,14 +9,14 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 
 /// Bump this when a new migration is appended to MIGRATIONS.
-pub const CURRENT_VERSION: u32 = 3;
+pub const CURRENT_VERSION: u32 = 4;
 
 /// Migration function type: transforms a JSON Value from version N to version N+1.
 pub type MigrationFn = fn(Value) -> Result<Value, ConfigError>;
 
 /// Ordered list of migration functions. Each entry migrates from version N to N+1,
 /// where N is the index into this slice (0-based, so index 0 = v1→v2, etc.).
-pub const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2, migrate_v2_to_v3];
+pub const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4];
 
 /// v1→v2: introduce `data_dir` (Option<PathBuf>). The body is a no-op stamp —
 /// `serde(default)` already handles missing fields on deserialize, but we
@@ -40,6 +40,20 @@ fn migrate_v1_to_v2(mut value: Value) -> Result<Value, ConfigError> {
 fn migrate_v2_to_v3(mut value: Value) -> Result<Value, ConfigError> {
     if let Value::Object(ref mut obj) = value {
         obj.entry("embeddings_dir".to_string()).or_insert(Value::Null);
+    }
+    Ok(value)
+}
+
+/// v3→v4: introduce `enabled_mcp_tools` (Vec<String>). Defaults to both tools
+/// enabled so existing installations gain file-retrieval without manual opt-in.
+fn migrate_v3_to_v4(mut value: Value) -> Result<Value, ConfigError> {
+    if let Value::Object(ref mut obj) = value {
+        obj.entry("enabled_mcp_tools".to_string()).or_insert_with(|| {
+            Value::Array(vec![
+                Value::String("codebase-retrieval".to_string()),
+                Value::String("file-retrieval".to_string()),
+            ])
+        });
     }
     Ok(value)
 }
@@ -135,6 +149,13 @@ fn default_mcp_stale_after_days() -> u64 {
     7
 }
 
+fn default_enabled_mcp_tools() -> Vec<String> {
+    vec![
+        "codebase-retrieval".to_string(),
+        "file-retrieval".to_string(),
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     /// Schema version. Server always stamps CURRENT_VERSION on write.
@@ -188,6 +209,10 @@ pub struct Settings {
     /// launch only.
     #[serde(default)]
     pub embeddings_dir: Option<PathBuf>,
+    /// Which MCP tools are exposed to clients. Tools not in this list are hidden
+    /// from `list_tools` and reject calls with a "tool disabled" error.
+    #[serde(default = "default_enabled_mcp_tools")]
+    pub enabled_mcp_tools: Vec<String>,
 }
 
 impl Default for Settings {
@@ -202,6 +227,7 @@ impl Default for Settings {
             vector_resident_cap_mb: default_vector_resident_cap_mb(),
             data_dir: None,
             embeddings_dir: None,
+            enabled_mcp_tools: default_enabled_mcp_tools(),
         }
     }
 }
@@ -546,7 +572,7 @@ mod tests {
 
         let raw = fs::read_to_string(&path).expect("re-read");
         let v: Value = serde_json::from_str(&raw).expect("parse re-read");
-        assert_eq!(v.get("version").and_then(|x| x.as_u64()), Some(3));
+        assert_eq!(v.get("version").and_then(|x| x.as_u64()), Some(CURRENT_VERSION as u64));
         assert!(
             v.get("embeddings_dir").map(|x| x.is_null()).unwrap_or(false),
             "on-disk embeddings_dir should be explicit null after v2→v3, got: {:?}",

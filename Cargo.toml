@@ -41,6 +41,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 schemars = "1"
 
+[profile.dev]
+debug = 0
+
 [profile.dev.package."*"]
 debug = false
 

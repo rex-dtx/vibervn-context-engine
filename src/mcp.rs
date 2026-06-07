@@ -30,6 +30,18 @@ pub struct CodebaseRetrievalArgs {
     pub workspace_full_path: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FileRetrievalArgs {
+    /// Absolute path to the repository root.
+    pub workspace_full_path: String,
+    /// Relative path to the file within the repository (e.g. "src/main.rs").
+    pub file_path: String,
+    /// Natural-language description of what you're looking for in this file.
+    pub information_request: String,
+    /// Number of top-scoring snippets to return. Defaults to 5.
+    pub top_k: Option<usize>,
+}
+
 // ─── MCP handler ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -57,14 +69,22 @@ impl McpHandler {
         index_engine: Arc<IndexEngine>,
         repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
         settings: Arc<RwLock<crate::config::Settings>>,
+        enabled_tools: &[String],
     ) -> Self {
+        let all_tools: &[&str] = &["codebase-retrieval", "file-retrieval"];
+        let mut router = Self::tool_router();
+        for &name in all_tools {
+            if !enabled_tools.iter().any(|e| e == name) {
+                router.disable_route(name);
+            }
+        }
         Self {
             home_dir,
             data_dir,
             index_engine,
             repo_dbs,
             settings,
-            tool_router: Self::tool_router(),
+            tool_router: router,
         }
     }
 
@@ -126,6 +146,34 @@ include the symbol or object. </RULES>"
             &settings,
             &args.information_request,
             &args.workspace_full_path,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        name = "file-retrieval",
+        description = "\
+Use instead of the Read tool when you don't know the specific line range to read. Rather than \
+reading the entire file, describe what you're looking for and get back only the relevant \
+snippets with line numbers. Input: workspace_full_path (repo root), file_path (relative path), \
+information_request (what you're looking for), top_k (optional, default 5). Results are indexed \
+snippets that may be incomplete — use the Read tool with the returned line ranges (expanded as \
+needed) to get current content before making edits."
+    )]
+    async fn file_retrieval(
+        &self,
+        Parameters(args): Parameters<FileRetrievalArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let text = run_file_retrieval(
+            &self.data_dir,
+            &self.repo_dbs,
+            &settings,
+            &args.workspace_full_path,
+            &args.file_path,
+            &args.information_request,
+            args.top_k.unwrap_or(5),
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -391,6 +439,91 @@ mod tests {
     fn just_outside_threshold_is_not_usable() {
         assert!(!check_usable(10, &Some(ts_days_ago(8)), THRESHOLD()));
     }
+
+    #[test]
+    fn file_retrieval_db_key_windows_backslash_input() {
+        let repo = r"D:\projects\Python\local-context-engine";
+        let file_path = r"context-engine-rs\Cargo.toml";
+        let db_key = build_db_key(repo, file_path);
+        assert_eq!(db_key, r"D:\projects\Python\local-context-engine\context-engine-rs\Cargo.toml");
+    }
+
+    #[test]
+    fn file_retrieval_db_key_forward_slash_input() {
+        let repo = r"D:\projects\Python\local-context-engine";
+        let file_path = "context-engine-rs/Cargo.toml";
+        let db_key = build_db_key(repo, file_path);
+        assert_eq!(db_key, r"D:\projects\Python\local-context-engine\context-engine-rs\Cargo.toml");
+    }
+
+    #[test]
+    fn file_retrieval_db_key_mixed_slashes() {
+        let repo = r"D:\projects\Python\local-context-engine";
+        let file_path = r"src/indexing\pipeline.rs";
+        let db_key = build_db_key(repo, file_path);
+        assert_eq!(db_key, r"D:\projects\Python\local-context-engine\src\indexing\pipeline.rs");
+    }
+
+    #[test]
+    fn file_retrieval_db_key_leading_slash_in_file_path() {
+        let repo = r"D:\projects\Python\local-context-engine";
+        let file_path = "/context-engine-rs/Cargo.toml";
+        let db_key = build_db_key(repo, file_path);
+        assert_eq!(db_key, r"D:\projects\Python\local-context-engine\context-engine-rs\Cargo.toml");
+    }
+
+    #[test]
+    fn file_retrieval_db_key_leading_backslash_in_file_path() {
+        let repo = r"D:\projects\Python\local-context-engine";
+        let file_path = r"\context-engine-rs\Cargo.toml";
+        let db_key = build_db_key(repo, file_path);
+        assert_eq!(db_key, r"D:\projects\Python\local-context-engine\context-engine-rs\Cargo.toml");
+    }
+
+    #[test]
+    fn file_retrieval_db_key_trailing_slash_in_workspace() {
+        let repo = r"D:\projects\Python\local-context-engine\";
+        let file_path = "context-engine-rs/Cargo.toml";
+        let db_key = build_db_key(repo, file_path);
+        assert_eq!(db_key, r"D:\projects\Python\local-context-engine\context-engine-rs\Cargo.toml");
+    }
+
+    #[test]
+    fn file_retrieval_db_key_both_edge_cases() {
+        let repo = r"D:\projects\Python\local-context-engine/";
+        let file_path = "/context-engine-rs/Cargo.toml";
+        let db_key = build_db_key(repo, file_path);
+        assert_eq!(db_key, r"D:\projects\Python\local-context-engine\context-engine-rs\Cargo.toml");
+    }
+
+    #[test]
+    fn file_retrieval_db_key_unix_paths() {
+        let repo = "/home/user/project";
+        let file_path = "src/main.rs";
+        let db_key = build_db_key(repo, file_path);
+        assert!(db_key.contains("src"));
+        assert!(db_key.contains("main.rs"));
+        assert!(!db_key.contains("//"));
+    }
+
+    #[test]
+    fn cosine_identical_vectors() {
+        let v = vec![1.0, 0.0, 0.0];
+        assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_orthogonal_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        assert!(cosine_similarity(&a, &b).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_empty_returns_zero() {
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0], &[]), 0.0);
+    }
 }
 
 /// Execute the query pipeline and format the results as plain text.
@@ -462,4 +595,178 @@ async fn do_query(
             out
         }
     }
+}
+
+// ─── File retrieval ───────────────────────────────────────────────────────
+
+/// Build the DB lookup key for a file: join workspace root + relative file_path,
+/// normalizing separators to the OS-native convention (the walker stores absolute
+/// paths using `Path::to_str()` which produces native separators).
+fn build_db_key(workspace: &str, file_path: &str) -> String {
+    let workspace = workspace.trim_end_matches(['/', '\\']);
+    let file_path = file_path.trim_start_matches(['/', '\\']);
+    let file_path_native = if cfg!(windows) {
+        file_path.replace('/', "\\")
+    } else {
+        file_path.replace('\\', "/")
+    };
+    let repo_path = std::path::Path::new(workspace);
+    let abs_file = repo_path.join(&file_path_native);
+    abs_file.to_string_lossy().to_string()
+}
+
+/// Single-file semantic retrieval: embed query → fetch file chunks from DB →
+/// cosine rank in-memory → return top-k snippets.
+pub async fn run_file_retrieval(
+    data_dir: &Path,
+    repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
+    settings: &Settings,
+    workspace_full_path: &str,
+    file_path: &str,
+    information_request: &str,
+    top_k: usize,
+) -> String {
+    let repo = workspace_full_path.trim();
+    if repo.is_empty() {
+        return "Error: workspace_full_path is required.".to_string();
+    }
+    let file_path = file_path.trim();
+    if file_path.is_empty() {
+        return "Error: file_path is required.".to_string();
+    }
+    if information_request.trim().is_empty() {
+        return "Error: information_request is required.".to_string();
+    }
+
+    if settings.embedding.api_keys.is_empty() {
+        return "Error: no embedding API keys configured.".to_string();
+    }
+
+    // Open DB for this repo.
+    let db = match store::get_or_open(repo_dbs, data_dir, repo).await {
+        Ok(d) => d,
+        Err(e) => return format!("Error: could not open index database: {e}"),
+    };
+
+    let db_key = build_db_key(repo, file_path);
+
+    // Fetch all chunks for this file (with embeddings).
+    let chunks = match chunks_for_file_with_embeddings(&db, &db_key).await {
+        Ok(c) => c,
+        Err(e) => return format!("Error: failed to fetch chunks: {e}"),
+    };
+
+    if chunks.is_empty() {
+        return format!("No indexed chunks found for file: {file_path}");
+    }
+
+    // Embed the query.
+    let voyage_client = match VoyageClient::new(
+        settings.embedding.model.clone(),
+        settings.embedding.api_keys.clone(),
+    ) {
+        Ok(c) => c,
+        Err(e) => return format!("Error: failed to create embedding client: {e}"),
+    };
+
+    let query_vec = match voyage_client.embed_query(information_request).await {
+        Ok(v) => v,
+        Err(e) => return format!("Error: embedding failed: {e}"),
+    };
+
+    if query_vec.is_empty() {
+        return "Error: embedding returned empty vector.".to_string();
+    }
+
+    // Cosine score each chunk against the query vector.
+    let mut scored: Vec<(f32, &FileChunkRow)> = chunks
+        .iter()
+        .filter(|c| !c.embedding.is_empty())
+        .map(|c| (cosine_similarity(&query_vec, &c.embedding), c))
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let top_k = top_k.min(scored.len());
+    let selected = &scored[..top_k];
+
+    // Format output identical to codebase-retrieval: path#Lstart-end\n<numbered lines>
+    let display_path = &db_key;
+    let mut out = String::new();
+    for (_, chunk) in selected {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        let numbered = chunk
+            .content
+            .lines()
+            .enumerate()
+            .map(|(i, line)| format!("{}: {}", chunk.line_start + i as u32, line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push_str(&format!(
+            "{}#L{}-{}\n{}",
+            display_path, chunk.line_start, chunk.line_end, numbered
+        ));
+    }
+
+    out.push_str(
+        "\n\n---\nSnippets may be incomplete. \
+         Use the Read tool with the returned line ranges \
+         (expanded as needed) to get current content before making edits.",
+    );
+
+    out
+}
+
+struct FileChunkRow {
+    line_start: u32,
+    line_end: u32,
+    content: String,
+    embedding: Vec<f32>,
+}
+
+async fn chunks_for_file_with_embeddings(
+    db: &Surreal<Db>,
+    file: &str,
+) -> anyhow::Result<Vec<FileChunkRow>> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        line_start: i64,
+        line_end: i64,
+        content: String,
+        #[serde(deserialize_with = "store::ops::de_embedding_dual")]
+        embedding: Vec<f32>,
+    }
+    let rows: Vec<Row> = db
+        .query(
+            "SELECT line_start, line_end, content, embedding \
+             FROM chunk WHERE file = $file ORDER BY line_start",
+        )
+        .bind(("file", file.to_string()))
+        .await?
+        .take(0)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| FileChunkRow {
+            line_start: r.line_start as u32,
+            line_end: r.line_end as u32,
+            content: r.content,
+            embedding: r.embedding,
+        })
+        .collect())
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }

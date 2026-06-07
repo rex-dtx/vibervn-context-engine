@@ -145,12 +145,14 @@ pub fn build_router(
     let session_manager = Arc::new(LocalSessionManager::default());
     let mcp_service = StreamableHttpService::new(
         move || {
+            let enabled = mcp_settings.blocking_read().enabled_mcp_tools.clone();
             Ok(McpHandler::new(
                 mcp_home.clone(),
                 mcp_data.clone(),
                 mcp_engine.clone(),
                 mcp_dbs.clone(),
                 mcp_settings.clone(),
+                &enabled,
             ))
         },
         session_manager,
@@ -174,6 +176,7 @@ pub fn build_router(
         .route("/api/index-status", get(get_index_status))
         .route("/api/query", post(post_query))
         .route("/api/mcp-tool", post(post_mcp_tool))
+        .route("/api/mcp-tool/file-retrieval", post(post_file_retrieval))
         .route("/api/embedding-cache", delete(delete_embedding_cache))
         .route("/api/defender-status", get(get_defender_status))
         .route("/api/defender-exclude", post(post_defender_exclude))
@@ -805,6 +808,35 @@ async fn post_mcp_tool(
         &settings,
         &req.information_request,
         &req.workspace_full_path,
+    )
+    .await;
+    Json(json!({ "result": result })).into_response()
+}
+
+// ─── File-retrieval REST proxy ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct FileRetrievalRequest {
+    workspace_full_path: String,
+    file_path: String,
+    information_request: String,
+    top_k: Option<usize>,
+}
+
+/// POST /api/mcp-tool/file-retrieval — call the file-retrieval funnel over HTTP.
+async fn post_file_retrieval(
+    State(state): State<AppState>,
+    Json(req): Json<FileRetrievalRequest>,
+) -> Response {
+    let settings = state.settings.read().await.clone();
+    let result = crate::mcp::run_file_retrieval(
+        &state.data_dir,
+        &state.repo_dbs,
+        &settings,
+        &req.workspace_full_path,
+        &req.file_path,
+        &req.information_request,
+        req.top_k.unwrap_or(5),
     )
     .await;
     Json(json!({ "result": result })).into_response()
