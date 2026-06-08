@@ -2,7 +2,7 @@
 
 [English](README.md) · [Tiếng Việt](README-vi.md) · **中文**
 
-![Web UI](screenshot.png)
+![Web UI](screenshot-zh.png)
 
 ## 安装与运行
 

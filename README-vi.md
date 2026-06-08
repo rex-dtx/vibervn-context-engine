@@ -2,7 +2,7 @@
 
 [English](README.md) · **Tiếng Việt** · [中文](README-zh.md)
 
-![Web UI](screenshot.png)
+![Web UI](screenshot-vi.png)
 
 ## Cài đặt & Chạy
 
