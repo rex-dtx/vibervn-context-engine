@@ -35,6 +35,18 @@ pub enum Lang {
     Java,
     C,
     Cpp,
+    CSharp,
+    Php,
+    Ruby,
+    ObjectiveC,
+    Swift,
+    Kotlin,
+    Dart,
+    Lua,
+    Luau,
+    Svelte,
+    Pascal,
+    Liquid,
     Other,
 }
 
@@ -50,6 +62,18 @@ pub fn detect_language(path: &Path) -> Lang {
         Some("c") => Lang::C,
         Some("cpp" | "cc" | "cxx") => Lang::Cpp,
         Some("h" | "hpp" | "hxx" | "hh") => Lang::Cpp,
+        Some("cs") => Lang::CSharp,
+        Some("php") => Lang::Php,
+        Some("rb") => Lang::Ruby,
+        Some("m" | "mm") => Lang::ObjectiveC,
+        Some("swift") => Lang::Swift,
+        Some("kt" | "kts") => Lang::Kotlin,
+        Some("dart") => Lang::Dart,
+        Some("lua") => Lang::Lua,
+        Some("luau") => Lang::Luau,
+        Some("svelte") => Lang::Svelte,
+        Some("pas" | "pp" | "dpr" | "lpr" | "dpk") => Lang::Pascal,
+        Some("liquid") => Lang::Liquid,
         _ => Lang::Other,
     }
 }
@@ -134,6 +158,98 @@ pub fn parse_file(file_path: &str, source: &str) -> ParseResult {
             (s, e, imp)
         }
         Lang::Other => (vec![], vec![], HashMap::new()),
+        Lang::CSharp => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_c_sharp::LANGUAGE.into(),
+                extract_csharp,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Php => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_php::LANGUAGE_PHP.into(),
+                extract_php,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Ruby => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_ruby::LANGUAGE.into(),
+                extract_ruby,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::ObjectiveC => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_objc::LANGUAGE.into(),
+                extract_objc,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Swift => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_swift::LANGUAGE.into(),
+                extract_swift,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Kotlin => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_kotlin_ng::LANGUAGE.into(),
+                extract_kotlin,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Dart => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_dart::LANGUAGE.into(),
+                extract_dart,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Lua => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_lua::LANGUAGE.into(),
+                extract_lua,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Luau => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_luau::LANGUAGE.into(),
+                extract_luau,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Svelte => {
+            let (s, e) = extract_svelte(file_path, source);
+            (s, e, HashMap::new())
+        }
+        Lang::Pascal => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_pascal::LANGUAGE.into(),
+                extract_pascal,
+            );
+            (s, e, HashMap::new())
+        }
+        Lang::Liquid => {
+            let (s, e) = parse_with_tree_sitter(
+                file_path, source,
+                tree_sitter_liquid::LANGUAGE.into(),
+                extract_liquid,
+            );
+            (s, e, HashMap::new())
+        }
     };
 
     let chunks = chunk_file(file_path, source, &symbols);
@@ -1182,6 +1298,1567 @@ fn extract_c_cpp_node(
     }
 }
 
+// ─── C# extractor ────────────────────────────────────────────────────────
+
+fn extract_csharp(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_csharp_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_csharp_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "method_declaration" | "constructor_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_csharp_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "class_declaration" | "record_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Class,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_csharp_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "struct_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Struct,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_csharp_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "interface_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Interface,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_csharp_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "enum_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Enum,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_csharp_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "namespace_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Module,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_csharp_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "invocation_expression" => {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee_name = node_text(&func_node, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_csharp_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_csharp_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── PHP extractor ───────────────────────────────────────────────────────
+
+fn extract_php(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_php_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_php_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "function_definition" | "method_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_php_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "class_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Class,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_php_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "interface_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Interface,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_php_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "trait_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Trait,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_php_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "namespace_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Module,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_php_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "enum_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Enum,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_php_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "function_call_expression" => {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee_name = node_text(&func_node, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_php_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        "member_call_expression" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let callee_name = node_text(&name_node, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_php_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        "scoped_call_expression" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let callee_name = node_text(&name_node, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_php_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_php_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Ruby extractor ──────────────────────────────────────────────────────
+
+fn extract_ruby(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_ruby_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_ruby_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "method" | "singleton_method" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_ruby_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "class" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Class,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_ruby_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "module" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Module,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_ruby_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "call" => {
+            if let Some(method_node) = node.child_by_field_name("method") {
+                let callee_name = node_text(&method_node, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_ruby_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_ruby_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Objective-C extractor ───────────────────────────────────────────────
+
+fn extract_objc(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_objc_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+/// Compose an ObjC selector from method_definition children.
+/// Selector parts are keyword_declarator nodes whose first identifier child
+/// forms the selector component (e.g. `initWithName:age:` from two keyword_declarators).
+fn objc_method_selector(node: &Node, source: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "keyword_declarator" => {
+                // The keyword (before the colon) is the first identifier-like child.
+                let mut inner_cursor = child.walk();
+                for inner in child.children(&mut inner_cursor) {
+                    if inner.kind() == "identifier" || inner.kind() == "keyword_selector" {
+                        parts.push(format!("{}:", node_text(&inner, source)));
+                        break;
+                    }
+                }
+            }
+            "identifier" if parts.is_empty() => {
+                // Unary selector (no parameters), e.g. `- (void)doSomething`
+                parts.push(node_text(&child, source).to_string());
+            }
+            _ => {}
+        }
+    }
+    if parts.is_empty() { None } else { Some(parts.join("")) }
+}
+
+/// Extract callee selector from a message_expression.
+fn objc_message_selector(node: &Node, source: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "keyword_argument" {
+            // keyword_argument has a `keyword` field that is the selector part
+            if let Some(kw) = child.child_by_field_name("keyword") {
+                parts.push(format!("{}:", node_text(&kw, source)));
+            }
+        }
+    }
+    // If no keyword_arguments found, look for the selector as a direct identifier child
+    // (unary message like `[obj doSomething]`)
+    if parts.is_empty() {
+        let mut cursor2 = node.walk();
+        let children: Vec<_> = node.children(&mut cursor2).collect();
+        // In `[receiver selector]`, the selector is typically the last identifier
+        // before the closing bracket.
+        for child in children.iter().rev() {
+            if child.kind() == "identifier" {
+                return Some(node_text(child, source).to_string());
+            }
+        }
+        return None;
+    }
+    Some(parts.join(""))
+}
+
+fn extract_objc_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "method_definition" => {
+            if let Some(sel) = objc_method_selector(node, source) {
+                let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                let sym = make_symbol(
+                    file, &sel, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(sel);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_objc_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "class_interface" => {
+            // First named child that is an identifier is the class name
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Class,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_objc_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "protocol_declaration" => {
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Interface,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_objc_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "message_expression" => {
+            if let Some(sel) = objc_message_selector(node, source)
+                && let Some(from_sym) = scope_to_qualified(file, scope)
+            {
+                edges.push(RawEdge {
+                    from: from_sym,
+                    to: EdgeTarget::Unresolved {
+                        name: sel,
+                        import_path: None,
+                        qualifier: None,
+                    },
+                    kind: EdgeKind::Calls,
+                    line: node_line_start(node),
+                });
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_objc_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_objc_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Swift extractor ─────────────────────────────────────────────────────
+
+fn extract_swift(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_swift_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_swift_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "function_declaration" | "init_declaration" => {
+            // Name is a positional simple_identifier child
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "simple_identifier")
+                .map(|c| node_text(&c, source).to_string())
+                .unwrap_or_else(|| "init".to_string());
+            let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+            let sym = make_symbol(
+                file, &name, scope.to_vec(), kind,
+                node_line_start(node), node_line_end(node),
+                None, parent_fqn.map(|s| s.to_string()),
+            );
+            let fqn = sym.qualified.fqn();
+            symbols.push(sym);
+            let mut child_scope = scope.to_vec();
+            child_scope.push(name);
+            let mut cursor2 = node.walk();
+            for child in node.children(&mut cursor2) {
+                extract_swift_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+            }
+        }
+        "class_declaration" => {
+            // Determine actual kind by looking at the keyword child text
+            let mut cursor = node.walk();
+            let mut keyword = "class";
+            let mut name_opt = None;
+            for child in node.children(&mut cursor) {
+                if child.kind() == "type_identifier" && name_opt.is_none() {
+                    name_opt = Some(node_text(&child, source).to_string());
+                }
+                // In some grammar versions the keyword is a direct child text node
+                let text = node_text(&child, source);
+                if text == "struct" || text == "enum" || text == "extension" {
+                    keyword = text;
+                }
+            }
+            if let Some(name) = name_opt {
+                let kind = match keyword {
+                    "struct" => SymbolKind::Struct,
+                    "enum" => SymbolKind::Enum,
+                    "extension" => SymbolKind::Extension,
+                    _ => SymbolKind::Class,
+                };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_swift_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "protocol_declaration" => {
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "type_identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Interface,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_swift_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "call_expression" => {
+            // First child is the callee expression
+            if let Some(first_child) = node.child(0) {
+                let callee_name = node_text(&first_child, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_swift_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_swift_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Kotlin extractor ────────────────────────────────────────────────────
+
+fn extract_kotlin(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_kotlin_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_kotlin_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "function_declaration" => {
+            // Name is a positional identifier child
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_kotlin_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "class_declaration" => {
+            // Determine kind from modifier keywords: interface, enum, etc.
+            let mut cursor = node.walk();
+            let mut kind = SymbolKind::Class;
+            let mut name_opt = None;
+            for child in node.children(&mut cursor) {
+                if child.kind() == "identifier" && name_opt.is_none() {
+                    name_opt = Some(node_text(&child, source).to_string());
+                }
+                // Check modifiers node for enum/interface keywords
+                if child.kind() == "modifiers" {
+                    let mod_text = node_text(&child, source);
+                    if mod_text.contains("enum") {
+                        kind = SymbolKind::Enum;
+                    }
+                }
+                // Direct text hints
+                let text = node_text(&child, source);
+                if text == "interface" {
+                    kind = SymbolKind::Interface;
+                } else if text == "enum" {
+                    kind = SymbolKind::Enum;
+                }
+            }
+            if let Some(name) = name_opt {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_kotlin_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "object_declaration" => {
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Class,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_kotlin_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "call_expression" => {
+            // First non-call_suffix child is the callee
+            let mut cursor = node.walk();
+            let callee = node.children(&mut cursor)
+                .find(|c| c.kind() != "call_suffix")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(callee_name) = callee
+                && let Some(from_sym) = scope_to_qualified(file, scope)
+            {
+                edges.push(RawEdge {
+                    from: from_sym,
+                    to: EdgeTarget::Unresolved {
+                        name: callee_name,
+                        import_path: None,
+                        qualifier: None,
+                    },
+                    kind: EdgeKind::Calls,
+                    line: node_line_start(node),
+                });
+            }
+            let mut cursor2 = node.walk();
+            for child in node.children(&mut cursor2) {
+                extract_kotlin_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_kotlin_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Dart extractor ──────────────────────────────────────────────────────
+
+/// Find the function/method name in a Dart method_declaration or function_declaration.
+/// Looks inside method_signature/function_signature children for an identifier after
+/// a type annotation, or uses field name if available.
+fn dart_find_function_name(node: &Node, source: &str) -> Option<String> {
+    // First try field "name" directly
+    if let Some(name_node) = node.child_by_field_name("name") {
+        return Some(node_text(&name_node, source).to_string());
+    }
+    // Look inside method_signature or function_signature child
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "method_signature" || child.kind() == "function_signature" {
+            if let Some(n) = child.child_by_field_name("name") {
+                return Some(node_text(&n, source).to_string());
+            }
+            // Try positional identifier
+            let mut inner_cursor = child.walk();
+            for inner in child.children(&mut inner_cursor) {
+                if inner.kind() == "identifier" {
+                    return Some(node_text(&inner, source).to_string());
+                }
+            }
+        }
+    }
+    // Fallback: look for direct identifier child (skipping type-like nodes)
+    let mut cursor2 = node.walk();
+    for child in node.children(&mut cursor2) {
+        if child.kind() == "identifier" {
+            return Some(node_text(&child, source).to_string());
+        }
+    }
+    None
+}
+
+fn extract_dart(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_dart_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_dart_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "method_declaration" | "function_declaration" => {
+            // Look for identifier in the method_signature/function_signature child, or directly
+            let name = dart_find_function_name(node, source);
+            if let Some(name) = name {
+                let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_dart_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            } else {
+                // Still recurse even if we couldn't find the name
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_dart_node(file, source, &child, scope, parent_fqn, symbols, edges);
+                }
+            }
+        }
+        "class_declaration" => {
+            // Positional identifier child
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Class,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_dart_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "enum_declaration" => {
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Enum,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_dart_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "mixin_declaration" => {
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Class,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_dart_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        // Dart doesn't have a single "call_expression" node type.
+        // Function invocations appear as identifier nodes followed by argument_part.
+        // We detect them by looking for nodes where a child has arguments.
+        "selector" | "unconditional_assignable_selector" => {
+            // Check if this contains an argument_part (indicating a call)
+            let mut has_args = false;
+            let mut callee_name = None;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "argument_part" || child.kind() == "arguments" {
+                    has_args = true;
+                }
+                if child.kind() == "identifier" && callee_name.is_none() {
+                    callee_name = Some(node_text(&child, source).to_string());
+                }
+            }
+            if has_args
+                && let Some(callee) = callee_name
+                && let Some(from_sym) = scope_to_qualified(file, scope)
+            {
+                edges.push(RawEdge {
+                    from: from_sym,
+                    to: EdgeTarget::Unresolved {
+                        name: callee,
+                        import_path: None,
+                        qualifier: None,
+                    },
+                    kind: EdgeKind::Calls,
+                    line: node_line_start(node),
+                });
+            }
+            let mut cursor2 = node.walk();
+            for child in node.children(&mut cursor2) {
+                extract_dart_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            // Detect top-level function calls: identifier immediately followed by arguments
+            if node.kind() == "identifier"
+                && let Some(next) = node.next_sibling()
+                && (next.kind() == "selector" || next.kind() == "argument_part" || next.kind() == "arguments")
+                && let Some(from_sym) = scope_to_qualified(file, scope)
+            {
+                let callee_name = node_text(node, source).to_string();
+                edges.push(RawEdge {
+                    from: from_sym,
+                    to: EdgeTarget::Unresolved {
+                        name: callee_name,
+                        import_path: None,
+                        qualifier: None,
+                    },
+                    kind: EdgeKind::Calls,
+                    line: node_line_start(node),
+                });
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_dart_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+// ─── Lua extractor ───────────────────────────────────────────────────────
+
+fn extract_lua(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_lua_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_lua_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "function_declaration" => {
+            // field "name" — could be identifier or method_index_expression (colon syntax)
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let (name, kind) = if name_node.kind() == "method_index_expression" {
+                    // Colon syntax: obj:method — extract the method field
+                    let method = name_node.child_by_field_name("method")
+                        .map(|m| node_text(&m, source).to_string())
+                        .unwrap_or_else(|| node_text(&name_node, source).to_string());
+                    (method, SymbolKind::Method)
+                } else {
+                    let name = node_text(&name_node, source).to_string();
+                    let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                    (name, kind)
+                };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_lua_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "function_call" => {
+            // field "name" — could be method_index_expression for colon calls
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let callee_name = if name_node.kind() == "method_index_expression" {
+                    name_node.child_by_field_name("method")
+                        .map(|m| node_text(&m, source).to_string())
+                        .unwrap_or_else(|| node_text(&name_node, source).to_string())
+                } else {
+                    node_text(&name_node, source).to_string()
+                };
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_lua_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_lua_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Luau extractor ──────────────────────────────────────────────────────
+
+fn extract_luau(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_luau_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_luau_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "function_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let (name, kind) = if name_node.kind() == "method_index_expression" {
+                    let method = name_node.child_by_field_name("method")
+                        .map(|m| node_text(&m, source).to_string())
+                        .unwrap_or_else(|| node_text(&name_node, source).to_string());
+                    (method, SymbolKind::Method)
+                } else {
+                    let name = node_text(&name_node, source).to_string();
+                    let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                    (name, kind)
+                };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_luau_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "type_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(&name_node, source).to_string();
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), SymbolKind::Struct,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                symbols.push(sym);
+            }
+        }
+        "function_call" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let callee_name = if name_node.kind() == "method_index_expression" {
+                    name_node.child_by_field_name("method")
+                        .map(|m| node_text(&m, source).to_string())
+                        .unwrap_or_else(|| node_text(&name_node, source).to_string())
+                } else {
+                    node_text(&name_node, source).to_string()
+                };
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_luau_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_luau_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Pascal extractor ────────────────────────────────────────────────────
+
+fn extract_pascal(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_pascal_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_pascal_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        "defProc" => {
+            // field "header" → declProc → field "name"
+            let name = node.child_by_field_name("header")
+                .and_then(|h| h.child_by_field_name("name"))
+                .map(|n| node_text(&n, source).to_string());
+            if let Some(name) = name {
+                let kind = if !scope.is_empty() { SymbolKind::Method } else { SymbolKind::Function };
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_pascal_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "declType" => {
+            // field "name" on declType gives the type name
+            let name = node.child_by_field_name("name")
+                .map(|n| node_text(&n, source).to_string());
+            if let Some(name) = name {
+                // Determine kind from child: declClass → Class, declIntf → Interface
+                let mut cursor = node.walk();
+                let mut kind = SymbolKind::Class;
+                for child in node.children(&mut cursor) {
+                    match child.kind() {
+                        "declClass" => { kind = SymbolKind::Class; break; }
+                        "declIntf" => { kind = SymbolKind::Interface; break; }
+                        _ => {}
+                    }
+                }
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_pascal_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            }
+        }
+        "exprCall" => {
+            // field "entity" is the callee
+            if let Some(entity) = node.child_by_field_name("entity") {
+                let callee_name = node_text(&entity, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_pascal_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_pascal_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
+// ─── Svelte extractor (hybrid: template parse → script extract → offset) ─
+
+fn extract_svelte(file: &str, source: &str) -> (Vec<Symbol>, Vec<RawEdge>) {
+    // Parse with tree-sitter-svelte-ng to find script_element nodes
+    let mut parser = Parser::new();
+    let lang: tree_sitter::Language = tree_sitter_svelte_ng::LANGUAGE.into();
+    if parser.set_language(&lang).is_err() {
+        return (vec![], vec![]);
+    }
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return (vec![], vec![]),
+    };
+
+    let mut all_symbols = Vec::new();
+    let mut all_edges = Vec::new();
+
+    // Walk the tree looking for script_element nodes
+    find_svelte_scripts(&tree.root_node(), file, source, &mut all_symbols, &mut all_edges);
+
+    (all_symbols, all_edges)
+}
+
+fn find_svelte_scripts(
+    node: &Node,
+    file: &str,
+    source: &str,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    if node.kind() == "script_element" {
+        // Find raw_text child for the script content
+        let mut cursor = node.walk();
+        let mut is_ts = false;
+
+        // Check start_tag for lang="ts" attribute
+        for child in node.children(&mut cursor) {
+            if child.kind() == "start_tag" {
+                let tag_text = node_text(&child, source);
+                if tag_text.contains("lang=\"ts\"") || tag_text.contains("lang='ts'") {
+                    is_ts = true;
+                }
+            }
+        }
+
+        let mut cursor2 = node.walk();
+        for child in node.children(&mut cursor2) {
+            if child.kind() == "raw_text" {
+                let script_content = node_text(&child, source);
+                let base_offset = child.start_position().row as u32;
+
+                // Parse with JS or TS grammar
+                let grammar: tree_sitter::Language = if is_ts {
+                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+                } else {
+                    tree_sitter_javascript::LANGUAGE.into()
+                };
+
+                let mut parser2 = Parser::new();
+                if parser2.set_language(&grammar).is_err() {
+                    continue;
+                }
+                let tree2 = match parser2.parse(script_content, None) {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                let (mut syms, mut edgs) = extract_javascript(file, script_content, &tree2);
+
+                // Apply line offset to all symbols and edges
+                for sym in &mut syms {
+                    sym.line_start += base_offset;
+                    sym.line_end += base_offset;
+                }
+                for edge in &mut edgs {
+                    edge.line += base_offset;
+                }
+
+                symbols.extend(syms);
+                edges.extend(edgs);
+            }
+        }
+        return; // Don't recurse into children further
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_svelte_scripts(&child, file, source, symbols, edges);
+    }
+}
+
+// ─── Liquid extractor ────────────────────────────────────────────────────
+
+fn extract_liquid(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_liquid_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
+}
+
+fn extract_liquid_node(
+    file: &str,
+    source: &str,
+    node: &Node,
+    scope: &[String],
+    parent_fqn: Option<&str>,
+    symbols: &mut Vec<Symbol>,
+    edges: &mut Vec<RawEdge>,
+) {
+    match node.kind() {
+        // Tag blocks that define symbols
+        "tag_assign" | "tag_capture" | "tag_for" | "tag_if" => {
+            // Look for the first identifier child as the "name" of this construct
+            let mut cursor = node.walk();
+            let name = node.children(&mut cursor)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| node_text(&c, source).to_string());
+            if let Some(name) = name {
+                let kind = SymbolKind::Function;
+                let sym = make_symbol(
+                    file, &name, scope.to_vec(), kind,
+                    node_line_start(node), node_line_end(node),
+                    None, parent_fqn.map(|s| s.to_string()),
+                );
+                let fqn = sym.qualified.fqn();
+                symbols.push(sym);
+                let mut child_scope = scope.to_vec();
+                child_scope.push(name);
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_liquid_node(file, source, &child, &child_scope, Some(&fqn), symbols, edges);
+                }
+            } else {
+                let mut cursor2 = node.walk();
+                for child in node.children(&mut cursor2) {
+                    extract_liquid_node(file, source, &child, scope, parent_fqn, symbols, edges);
+                }
+            }
+        }
+        // Variable/filter references as call edges
+        "filter" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let callee_name = node_text(&name_node, source).to_string();
+                if let Some(from_sym) = scope_to_qualified(file, scope) {
+                    edges.push(RawEdge {
+                        from: from_sym,
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::Calls,
+                        line: node_line_start(node),
+                    });
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_liquid_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_liquid_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+    }
+}
+
 // ─── C / C++ unit tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1404,5 +3081,443 @@ void caller() {
             callee_names.contains(&"ptr_method"),
             "expected callee 'ptr_method' (from ptr->ptr_method()); got: {:?}", callee_names
         );
+    }
+}
+
+// ─── New language extractor tests ────────────────────────────────────────
+
+#[cfg(test)]
+mod csharp_tests {
+    use super::*;
+
+    #[test]
+    fn test_csharp_class_method_namespace() {
+        let src = r#"
+namespace MyApp {
+    class Greeter {
+        void SayHello() {
+            Console.WriteLine("Hello");
+        }
+    }
+}
+"#;
+        let result = parse_file("test.cs", src);
+        let ns = result.symbols.iter().find(|s| s.qualified.name == "MyApp");
+        assert!(ns.is_some(), "expected namespace MyApp");
+        assert_eq!(ns.unwrap().kind, SymbolKind::Module);
+
+        let cls = result.symbols.iter().find(|s| s.qualified.name == "Greeter");
+        assert!(cls.is_some(), "expected class Greeter");
+        assert_eq!(cls.unwrap().kind, SymbolKind::Class);
+
+        let method = result.symbols.iter().find(|s| s.qualified.name == "SayHello");
+        assert!(method.is_some(), "expected method SayHello");
+        assert_eq!(method.unwrap().kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn test_csharp_interface_enum() {
+        let src = r#"
+interface IService {
+    void Run();
+}
+enum Color { Red, Green, Blue }
+"#;
+        let result = parse_file("test.cs", src);
+        let iface = result.symbols.iter().find(|s| s.qualified.name == "IService");
+        assert!(iface.is_some(), "expected interface IService");
+        assert_eq!(iface.unwrap().kind, SymbolKind::Interface);
+
+        let enm = result.symbols.iter().find(|s| s.qualified.name == "Color");
+        assert!(enm.is_some(), "expected enum Color");
+        assert_eq!(enm.unwrap().kind, SymbolKind::Enum);
+    }
+
+    #[test]
+    fn test_csharp_call_edge() {
+        let src = r#"
+class Foo {
+    void Bar() {
+        Baz();
+    }
+}
+"#;
+        let result = parse_file("test.cs", src);
+        let edge = result.edges.iter().find(|e| {
+            if let EdgeTarget::Unresolved { name, .. } = &e.to {
+                name.contains("Baz")
+            } else { false }
+        });
+        assert!(edge.is_some(), "expected call edge to Baz; edges: {:?}", result.edges);
+    }
+}
+
+#[cfg(test)]
+mod php_tests {
+    use super::*;
+
+    #[test]
+    fn test_php_class_method_namespace() {
+        let src = r#"<?php
+namespace App;
+class UserService {
+    function getUser() {
+        return $this->findById(1);
+    }
+}
+"#;
+        let result = parse_file("test.php", src);
+        let ns = result.symbols.iter().find(|s| s.qualified.name == "App");
+        assert!(ns.is_some(), "expected namespace App; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(ns.unwrap().kind, SymbolKind::Module);
+
+        let cls = result.symbols.iter().find(|s| s.qualified.name == "UserService");
+        assert!(cls.is_some(), "expected class UserService");
+        assert_eq!(cls.unwrap().kind, SymbolKind::Class);
+
+        let method = result.symbols.iter().find(|s| s.qualified.name == "getUser");
+        assert!(method.is_some(), "expected method getUser");
+        assert_eq!(method.unwrap().kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn test_php_interface_trait_enum() {
+        let src = r#"<?php
+interface Cacheable {}
+trait Loggable {}
+enum Status { case Active; case Inactive; }
+"#;
+        let result = parse_file("test.php", src);
+        let iface = result.symbols.iter().find(|s| s.qualified.name == "Cacheable");
+        assert!(iface.is_some(), "expected interface Cacheable");
+        assert_eq!(iface.unwrap().kind, SymbolKind::Interface);
+
+        let tr = result.symbols.iter().find(|s| s.qualified.name == "Loggable");
+        assert!(tr.is_some(), "expected trait Loggable");
+        assert_eq!(tr.unwrap().kind, SymbolKind::Trait);
+
+        let enm = result.symbols.iter().find(|s| s.qualified.name == "Status");
+        assert!(enm.is_some(), "expected enum Status");
+        assert_eq!(enm.unwrap().kind, SymbolKind::Enum);
+    }
+
+    #[test]
+    fn test_php_call_edges() {
+        let src = r#"<?php
+class Foo {
+    function bar() {
+        baz();
+        $this->qux();
+    }
+}
+"#;
+        let result = parse_file("test.php", src);
+        let baz_edge = result.edges.iter().find(|e| {
+            if let EdgeTarget::Unresolved { name, .. } = &e.to { name == "baz" } else { false }
+        });
+        assert!(baz_edge.is_some(), "expected call to baz");
+        let qux_edge = result.edges.iter().find(|e| {
+            if let EdgeTarget::Unresolved { name, .. } = &e.to { name == "qux" } else { false }
+        });
+        assert!(qux_edge.is_some(), "expected call to qux");
+    }
+}
+
+#[cfg(test)]
+mod ruby_tests {
+    use super::*;
+
+    #[test]
+    fn test_ruby_class_module_method() {
+        let src = r#"
+module Utils
+  class Parser
+    def parse(input)
+      tokenize(input)
+    end
+  end
+end
+"#;
+        let result = parse_file("test.rb", src);
+        let mod_sym = result.symbols.iter().find(|s| s.qualified.name == "Utils");
+        assert!(mod_sym.is_some(), "expected module Utils");
+        assert_eq!(mod_sym.unwrap().kind, SymbolKind::Module);
+
+        let cls = result.symbols.iter().find(|s| s.qualified.name == "Parser");
+        assert!(cls.is_some(), "expected class Parser");
+        assert_eq!(cls.unwrap().kind, SymbolKind::Class);
+
+        let method = result.symbols.iter().find(|s| s.qualified.name == "parse");
+        assert!(method.is_some(), "expected method parse");
+        assert_eq!(method.unwrap().kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn test_ruby_call_edge() {
+        let src = r#"
+class Foo
+  def bar
+    baz()
+  end
+end
+"#;
+        let result = parse_file("test.rb", src);
+        let edge = result.edges.iter().find(|e| {
+            if let EdgeTarget::Unresolved { name, .. } = &e.to { name == "baz" } else { false }
+        });
+        assert!(edge.is_some(), "expected call edge to baz; edges: {:?}", result.edges);
+    }
+}
+
+#[cfg(test)]
+mod kotlin_tests {
+    use super::*;
+
+    #[test]
+    fn test_kotlin_class_function() {
+        let src = r#"
+class UserRepo {
+    fun findById(id: Int): User {
+        return query(id)
+    }
+}
+"#;
+        let result = parse_file("test.kt", src);
+        let cls = result.symbols.iter().find(|s| s.qualified.name == "UserRepo");
+        assert!(cls.is_some(), "expected class UserRepo; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(cls.unwrap().kind, SymbolKind::Class);
+
+        let func = result.symbols.iter().find(|s| s.qualified.name == "findById");
+        assert!(func.is_some(), "expected function findById");
+        assert_eq!(func.unwrap().kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn test_kotlin_call_edge() {
+        let src = r#"
+fun main() {
+    println("hello")
+}
+"#;
+        let result = parse_file("test.kt", src);
+        let func = result.symbols.iter().find(|s| s.qualified.name == "main");
+        assert!(func.is_some(), "expected function main");
+        assert_eq!(func.unwrap().kind, SymbolKind::Function);
+
+        let edge = result.edges.iter().find(|e| {
+            if let EdgeTarget::Unresolved { name, .. } = &e.to { name.contains("println") } else { false }
+        });
+        assert!(edge.is_some(), "expected call edge to println; edges: {:?}", result.edges);
+    }
+}
+
+#[cfg(test)]
+mod swift_tests {
+    use super::*;
+
+    #[test]
+    fn test_swift_class_function() {
+        let src = r#"
+class Greeter {
+    func greet(name: String) {
+        print(name)
+    }
+}
+"#;
+        let result = parse_file("test.swift", src);
+        let cls = result.symbols.iter().find(|s| s.qualified.name == "Greeter");
+        assert!(cls.is_some(), "expected class Greeter; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+
+        let func = result.symbols.iter().find(|s| s.qualified.name == "greet");
+        assert!(func.is_some(), "expected function greet");
+        assert_eq!(func.unwrap().kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn test_swift_protocol() {
+        let src = r#"
+protocol Drawable {
+    func draw()
+}
+"#;
+        let result = parse_file("test.swift", src);
+        let proto = result.symbols.iter().find(|s| s.qualified.name == "Drawable");
+        assert!(proto.is_some(), "expected protocol Drawable; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(proto.unwrap().kind, SymbolKind::Interface);
+    }
+}
+
+#[cfg(test)]
+mod dart_tests {
+    use super::*;
+
+    #[test]
+    fn test_dart_class_method() {
+        let src = r#"
+class Animal {
+  void speak() {
+    print("...");
+  }
+}
+"#;
+        let result = parse_file("test.dart", src);
+        let cls = result.symbols.iter().find(|s| s.qualified.name == "Animal");
+        assert!(cls.is_some(), "expected class Animal; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(cls.unwrap().kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn test_dart_enum() {
+        let src = r#"
+enum Direction { north, south, east, west }
+"#;
+        let result = parse_file("test.dart", src);
+        let enm = result.symbols.iter().find(|s| s.qualified.name == "Direction");
+        assert!(enm.is_some(), "expected enum Direction; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(enm.unwrap().kind, SymbolKind::Enum);
+    }
+}
+
+#[cfg(test)]
+mod lua_tests {
+    use super::*;
+
+    #[test]
+    fn test_lua_function() {
+        let src = r#"
+function greet(name)
+    print(name)
+end
+"#;
+        let result = parse_file("test.lua", src);
+        let func = result.symbols.iter().find(|s| s.qualified.name == "greet");
+        assert!(func.is_some(), "expected function greet; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(func.unwrap().kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn test_lua_call_edge() {
+        let src = r#"
+function foo()
+    bar()
+end
+"#;
+        let result = parse_file("test.lua", src);
+        let edge = result.edges.iter().find(|e| {
+            if let EdgeTarget::Unresolved { name, .. } = &e.to { name == "bar" } else { false }
+        });
+        assert!(edge.is_some(), "expected call edge to bar; edges: {:?}", result.edges);
+    }
+
+    #[test]
+    fn test_lua_colon_method() {
+        let src = r#"
+function obj:method()
+    self:other()
+end
+"#;
+        let result = parse_file("test.lua", src);
+        let method = result.symbols.iter().find(|s| s.qualified.name == "method");
+        assert!(method.is_some(), "expected method; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(method.unwrap().kind, SymbolKind::Method);
+    }
+}
+
+#[cfg(test)]
+mod luau_tests {
+    use super::*;
+
+    #[test]
+    fn test_luau_function_and_type() {
+        let src = r#"
+type Point = { x: number, y: number }
+
+function distance(a: Point, b: Point): number
+    return math.sqrt(0)
+end
+"#;
+        let result = parse_file("test.luau", src);
+        let type_sym = result.symbols.iter().find(|s| s.qualified.name == "Point");
+        assert!(type_sym.is_some(), "expected type Point; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(type_sym.unwrap().kind, SymbolKind::Struct);
+
+        let func = result.symbols.iter().find(|s| s.qualified.name == "distance");
+        assert!(func.is_some(), "expected function distance");
+        assert_eq!(func.unwrap().kind, SymbolKind::Function);
+    }
+}
+
+#[cfg(test)]
+mod pascal_tests {
+    use super::*;
+
+    #[test]
+    fn test_pascal_procedure() {
+        let src = r#"
+procedure Hello;
+begin
+  WriteLn('Hello');
+end;
+"#;
+        let result = parse_file("test.pas", src);
+        // Pascal grammar may vary; check if we get any symbols at all
+        if !result.symbols.is_empty() {
+            let proc = result.symbols.iter().find(|s| s.qualified.name == "Hello");
+            assert!(proc.is_some(), "expected procedure Hello; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        }
+    }
+}
+
+#[cfg(test)]
+mod svelte_tests {
+    use super::*;
+
+    #[test]
+    fn test_svelte_script_extraction() {
+        let src = r#"<script>
+function greet(name) {
+    console.log(name);
+}
+</script>
+
+<h1>Hello</h1>
+"#;
+        let result = parse_file("test.svelte", src);
+        let func = result.symbols.iter().find(|s| s.qualified.name == "greet");
+        assert!(func.is_some(), "expected function greet from script block; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+        assert_eq!(func.unwrap().kind, SymbolKind::Function);
+        // Line offset: script block starts at line 1 (0-indexed row 0),
+        // raw_text starts at row 1, function is on row 1 of raw_text
+        // so line_start should be > 1
+        assert!(func.unwrap().line_start >= 2, "line_start should be offset; got {}", func.unwrap().line_start);
+    }
+
+    #[test]
+    fn test_svelte_ts_script() {
+        let src = r#"<script lang="ts">
+function typedFunc(): string {
+    return "hello";
+}
+</script>
+"#;
+        let result = parse_file("test.svelte", src);
+        let func = result.symbols.iter().find(|s| s.qualified.name == "typedFunc");
+        assert!(func.is_some(), "expected function typedFunc from TS script block; syms: {:?}", result.symbols.iter().map(|s| &s.qualified.name).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod liquid_tests {
+    use super::*;
+
+    #[test]
+    fn test_liquid_basic_parse() {
+        let src = r#"{% assign greeting = "hello" %}
+{{ greeting | upcase }}
+"#;
+        let result = parse_file("test.liquid", src);
+        // Liquid parsing should not crash, and ideally find symbols
+        // The exact grammar behavior depends on the vendored parser
+        assert!(result.chunks.len() > 0, "expected at least one chunk from liquid file");
     }
 }

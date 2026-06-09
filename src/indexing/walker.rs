@@ -8,13 +8,14 @@ use tracing::debug;
 /// Extensions considered indexable code/config.
 pub const CODE_EXTENSIONS: &[&str] = &[
     "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "cs", "cpp", "c", "h", "hpp", "cc", "cxx", "hxx", "hh",
-    "rb", "php", "swift", "kt", "scala", "ex", "exs", "clj", "hs", "ml", "lua", "r",
+    "rb", "php", "swift", "kt", "kts", "scala", "ex", "exs", "clj", "hs", "ml", "lua", "luau", "r",
     "sh", "bash", "zsh", "fish", "ps1", "yaml", "yml", "toml", "json", "xml", "html",
     "css", "scss", "sass", "less", "sql", "proto", "graphql", "md", "txt", "dockerfile", "tf", "hcl",
     "vue", "svelte", "astro", "mdx", "prisma",
     "dart", "zig", "nim", "sol", "elm", "jl", "erl", "hrl", "nix",
     "m", "mm", "groovy", "gradle", "pl", "pm", "rst",
     "wgsl", "glsl", "hlsl",
+    "pas", "pp", "dpr", "lpr", "dpk", "liquid",
 ];
 
 /// Non-dot directories to always skip (dot-prefixed directories are pruned by the

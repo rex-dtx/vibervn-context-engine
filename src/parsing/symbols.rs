@@ -11,6 +11,8 @@ pub enum SymbolKind {
     Class,
     Module,
     Interface,
+    Enum,
+    Extension,
 }
 
 /// Fully-qualified reference to a symbol — uniquely identifies it across files.

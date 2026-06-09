@@ -176,6 +176,8 @@ pub fn kind_to_str(k: &SymbolKind) -> &'static str {
         SymbolKind::Class => "class",
         SymbolKind::Module => "module",
         SymbolKind::Interface => "interface",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Extension => "extension",
     }
 }
 
