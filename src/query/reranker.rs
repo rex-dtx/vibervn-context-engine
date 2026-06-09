@@ -380,6 +380,7 @@ trait AgenticBackend {
 /// Production backend: forwards to the real LLM client and `run_sub_query`.
 struct LiveBackend<'a> {
     llm_client: &'a LlmClient,
+    prompt_cache_key: Option<String>,
     repo_filter: &'a str,
     voyage_client: &'a VoyageClient,
     index_engine: &'a Arc<IndexEngine>,
@@ -395,7 +396,7 @@ impl AgenticBackend for LiveBackend<'_> {
         tools: &[ToolDef],
         force_tool_use: bool,
     ) -> impl std::future::Future<Output = anyhow::Result<ToolTurnResult>> + Send {
-        self.llm_client.complete_with_tools(system, messages, tools, 0.0, force_tool_use)
+        self.llm_client.complete_with_tools(system, messages, tools, 0.0, force_tool_use, self.prompt_cache_key.as_deref())
     }
 
     fn sub_query(
@@ -438,8 +439,16 @@ pub async fn rerank_agentic(
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     warm_wait: std::time::Duration,
 ) -> (RerankOutput, ExtendedPool) {
+    use std::hash::{Hash, Hasher};
+    let cache_key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        query.hash(&mut hasher);
+        repo_filter.hash(&mut hasher);
+        format!("agentic-rerank-{:x}", hasher.finish())
+    };
     let backend = LiveBackend {
         llm_client,
+        prompt_cache_key: Some(cache_key),
         repo_filter,
         voyage_client,
         index_engine,

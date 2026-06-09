@@ -157,6 +157,7 @@ impl LlmClient {
     }
 
     /// Dispatch to the provider-specific tool-calling function.
+    #[allow(clippy::too_many_arguments)]
     async fn call_provider_with_tools(
         &self,
         system: &str,
@@ -165,6 +166,7 @@ impl LlmClient {
         temperature: f32,
         force_tool_use: bool,
         key: &str,
+        prompt_cache_key: Option<&str>,
     ) -> Result<ToolTurnResult> {
         match self.provider.as_str() {
             "google" => {
@@ -182,7 +184,7 @@ impl LlmClient {
                 }
             }
             "openai" => {
-                let r = openai::complete_with_tools(&self.http, &self.model, key, system, contents, tools, temperature, force_tool_use).await?;
+                let r = openai::complete_with_tools(&self.http, &self.model, key, system, contents, tools, temperature, force_tool_use, prompt_cache_key).await?;
                 match r {
                     openai::ToolTurnResult::Text(t) => Ok(ToolTurnResult::Text(t)),
                     openai::ToolTurnResult::ToolCalls(calls) => Ok(ToolTurnResult::ToolCalls(
@@ -212,6 +214,7 @@ impl LlmClient {
         tools: &[ToolDef],
         temperature: f32,
         force_tool_use: bool,
+        prompt_cache_key: Option<&str>,
     ) -> Result<ToolTurnResult> {
         let n_keys = self.api_keys.len();
         let start_cursor = self.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
@@ -221,7 +224,7 @@ impl LlmClient {
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
             let key = &self.api_keys[key_idx];
-            match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key).await {
+            match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key, prompt_cache_key).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     warn!(key_index = key_idx, error = %e, "LLM tool-call failed — trying next key");
@@ -235,7 +238,7 @@ impl LlmClient {
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
             let key = &self.api_keys[key_idx];
-            match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key).await {
+            match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key, prompt_cache_key).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     last_err = Some(e);

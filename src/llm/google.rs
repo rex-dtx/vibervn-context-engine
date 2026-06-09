@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::ToolDef;
 
@@ -113,6 +113,18 @@ where
 struct GeminiResponse {
     candidates: Option<Vec<Candidate>>,
     error: Option<GeminiError>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<UsageMetadata>,
+}
+
+#[derive(Deserialize)]
+struct UsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<u32>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<u32>,
+    #[serde(rename = "cachedContentTokenCount")]
+    cached_content_token_count: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +154,21 @@ struct GeminiError {
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────
+
+fn log_cache_metrics(usage: &Option<UsageMetadata>) {
+    if let Some(u) = usage {
+        let prompt = u.prompt_token_count.unwrap_or(0);
+        let completion = u.candidates_token_count.unwrap_or(0);
+        let cached = u.cached_content_token_count.unwrap_or(0);
+        info!(
+            prompt_tokens = prompt,
+            completion_tokens = completion,
+            cached_tokens = cached,
+            cache_hit_pct = if prompt > 0 { (cached as f64 / prompt as f64 * 100.0) as u32 } else { 0 },
+            "gemini cache metrics"
+        );
+    }
+}
 
 pub async fn complete(
     http: &Client,
@@ -197,6 +224,8 @@ pub async fn complete(
     if let Some(err) = parsed.error {
         bail!("Gemini API error: {}", err.message);
     }
+
+    log_cache_metrics(&parsed.usage_metadata);
 
     let result_text = parsed.candidates
         .and_then(|c| c.into_iter().next())
@@ -321,6 +350,8 @@ pub async fn complete_with_tools(
     if let Some(err) = parsed.error {
         bail!("Gemini API error: {}", err.message);
     }
+
+    log_cache_metrics(&parsed.usage_metadata);
 
     let parts = parsed.candidates
         .and_then(|c| c.into_iter().next())
@@ -459,5 +490,50 @@ mod tests {
         let fc = part.function_call.expect("has call");
         assert_eq!(fc.name, "get_info");
         assert!(fc.args.is_null());
+    }
+
+    #[test]
+    fn usage_metadata_with_cached_tokens_deserializes() {
+        let json = r#"{
+            "candidates": [{"content": {"parts": [{"text": "hello"}], "role": "model"}}],
+            "usageMetadata": {
+                "promptTokenCount": 2000,
+                "candidatesTokenCount": 150,
+                "cachedContentTokenCount": 1800
+            }
+        }"#;
+        let resp: GeminiResponse = serde_json::from_str(json).expect("parse");
+        let usage = resp.usage_metadata.expect("has usage");
+        assert_eq!(usage.prompt_token_count, Some(2000));
+        assert_eq!(usage.candidates_token_count, Some(150));
+        assert_eq!(usage.cached_content_token_count, Some(1800));
+    }
+
+    #[test]
+    fn usage_metadata_without_cache_deserializes() {
+        let json = r#"{
+            "candidates": [{"content": {"parts": [{"text": "ok"}], "role": "model"}}],
+            "usageMetadata": {
+                "promptTokenCount": 500,
+                "candidatesTokenCount": 50
+            }
+        }"#;
+        let resp: GeminiResponse = serde_json::from_str(json).expect("parse");
+        let usage = resp.usage_metadata.expect("has usage");
+        assert_eq!(usage.prompt_token_count, Some(500));
+        assert!(usage.cached_content_token_count.is_none());
+    }
+
+    #[test]
+    fn response_without_usage_metadata_deserializes() {
+        let json = r#"{"candidates": [{"content": {"parts": [{"text": "hi"}], "role": "model"}}]}"#;
+        let resp: GeminiResponse = serde_json::from_str(json).expect("parse");
+        assert!(resp.usage_metadata.is_none());
+        let text = resp.candidates
+            .and_then(|c| c.into_iter().next())
+            .and_then(|c| c.content)
+            .and_then(|c| c.parts.into_iter().next())
+            .and_then(|p| p.text);
+        assert_eq!(text.as_deref(), Some("hi"));
     }
 }

@@ -785,8 +785,8 @@ mod tests {
         assert_eq!(loaded.version, CURRENT_VERSION);
         assert!(!loaded.llm.agentic_rag, "agentic_rag must default to false on old files");
         assert_eq!(
-            loaded.llm.agentic_rag_max_turns, 3,
-            "agentic_rag_max_turns must default to 3 on old files"
+            loaded.llm.agentic_rag_max_turns, 9,
+            "agentic_rag_max_turns must default to 9 on old files"
         );
         assert_eq!(
             loaded.llm.agentic_rag_max_chunk_chars, 50_000,
@@ -802,7 +802,7 @@ mod tests {
         let json = r#"{"provider":"google","rerank_model":"gemini-3.1-flash-lite","api_keys":["k"]}"#;
         let cfg: LlmConfig = serde_json::from_str(json).expect("deserialize old llm block");
         assert!(!cfg.agentic_rag);
-        assert_eq!(cfg.agentic_rag_max_turns, 3);
+        assert_eq!(cfg.agentic_rag_max_turns, 9);
         assert_eq!(cfg.agentic_rag_max_chunk_chars, 50_000);
     }
 }

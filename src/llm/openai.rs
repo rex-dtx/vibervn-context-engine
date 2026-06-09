@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 use super::ToolDef;
 
@@ -18,6 +19,8 @@ struct ChatRequest {
     /// "required" forces a tool call (no prose); omitted = model's choice (auto).
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +71,19 @@ struct OpenAIFunction {
 struct ChatResponse {
     choices: Option<Vec<Choice>>,
     error: Option<OpenAIError>,
+    usage: Option<Usage>,
+}
+
+#[derive(Deserialize)]
+struct Usage {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    cached_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +103,23 @@ struct OpenAIError {
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────
+
+fn log_cache_metrics(usage: &Option<Usage>) {
+    if let Some(u) = usage {
+        let prompt = u.prompt_tokens.unwrap_or(0);
+        let completion = u.completion_tokens.unwrap_or(0);
+        let cached = u.prompt_tokens_details.as_ref()
+            .and_then(|d| d.cached_tokens)
+            .unwrap_or(0);
+        info!(
+            prompt_tokens = prompt,
+            completion_tokens = completion,
+            cached_tokens = cached,
+            cache_hit_pct = if prompt > 0 { (cached as f64 / prompt as f64 * 100.0) as u32 } else { 0 },
+            "openai cache metrics"
+        );
+    }
+}
 
 /// Guarantee the literal token "json" is present in the messages when
 /// `structured` json_object mode is on (OpenAI rejects the request otherwise).
@@ -124,6 +157,7 @@ pub async fn complete(
         response_format: structured.then(|| ResponseFormat { kind: "json_object".to_owned() }),
         tools: None,
         tool_choice: None,
+        prompt_cache_key: None,
     };
 
     let resp = http
@@ -147,6 +181,8 @@ pub async fn complete(
     if let Some(err) = parsed.error {
         bail!("OpenAI API error: {}", err.message);
     }
+
+    log_cache_metrics(&parsed.usage);
 
     let result_text = parsed.choices
         .and_then(|c| c.into_iter().next())
@@ -175,6 +211,7 @@ pub async fn complete_with_tools(
     tools: &[ToolDef],
     temperature: f32,
     force_tool_use: bool,
+    prompt_cache_key: Option<&str>,
 ) -> Result<ToolTurnResult> {
     let url = "https://api.openai.com/v1/chat/completions";
 
@@ -231,6 +268,7 @@ pub async fn complete_with_tools(
         // "required" forces a tool call while no chunk is committed; otherwise
         // omit (model may finish with a text summary).
         tool_choice: force_tool_use.then(|| "required".to_owned()),
+        prompt_cache_key: prompt_cache_key.map(|s| s.to_owned()),
     };
 
     let resp = http
@@ -255,6 +293,8 @@ pub async fn complete_with_tools(
         bail!("OpenAI API error: {}", err.message);
     }
 
+    log_cache_metrics(&parsed.usage);
+
     let choice = parsed.choices
         .and_then(|c| c.into_iter().next());
 
@@ -273,7 +313,7 @@ pub async fn complete_with_tools(
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_json_token;
+    use super::*;
 
     #[test]
     fn token_present_in_system_is_unchanged() {
@@ -297,5 +337,79 @@ mod tests {
     fn not_structured_never_modifies() {
         let s = ensure_json_token(false, "You are a ranker.", "rank these chunks");
         assert_eq!(s, "You are a ranker.");
+    }
+
+    #[test]
+    fn usage_with_cached_tokens_deserializes() {
+        let json = r#"{
+            "choices": [{"message": {"content": "hello"}}],
+            "usage": {
+                "prompt_tokens": 1500,
+                "completion_tokens": 200,
+                "prompt_tokens_details": {
+                    "cached_tokens": 1024
+                }
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).expect("parse");
+        let usage = resp.usage.expect("has usage");
+        assert_eq!(usage.prompt_tokens, Some(1500));
+        assert_eq!(usage.completion_tokens, Some(200));
+        let details = usage.prompt_tokens_details.expect("has details");
+        assert_eq!(details.cached_tokens, Some(1024));
+    }
+
+    #[test]
+    fn usage_without_cache_details_deserializes() {
+        let json = r#"{
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 100
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).expect("parse");
+        let usage = resp.usage.expect("has usage");
+        assert_eq!(usage.prompt_tokens, Some(500));
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn response_without_usage_deserializes() {
+        let json = r#"{"choices": [{"message": {"content": "ok"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).expect("parse");
+        assert!(resp.usage.is_none());
+        let text = resp.choices.unwrap().into_iter().next().unwrap().message.content;
+        assert_eq!(text.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn prompt_cache_key_serializes_when_present() {
+        let body = ChatRequest {
+            model: "gpt-4o".to_owned(),
+            messages: vec![],
+            temperature: 0.0,
+            response_format: None,
+            tools: None,
+            tool_choice: None,
+            prompt_cache_key: Some("test-key-123".to_owned()),
+        };
+        let json = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(json.get("prompt_cache_key").and_then(|v| v.as_str()), Some("test-key-123"));
+    }
+
+    #[test]
+    fn prompt_cache_key_omitted_when_none() {
+        let body = ChatRequest {
+            model: "gpt-4o".to_owned(),
+            messages: vec![],
+            temperature: 0.0,
+            response_format: None,
+            tools: None,
+            tool_choice: None,
+            prompt_cache_key: None,
+        };
+        let json = serde_json::to_value(&body).expect("serialize");
+        assert!(json.get("prompt_cache_key").is_none());
     }
 }
