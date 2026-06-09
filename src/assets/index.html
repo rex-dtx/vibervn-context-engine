@@ -1761,6 +1761,7 @@ async function saveNow() {
       return;
     }
     cfg = await res.json();
+    renderRepos();
     showToast();
   } catch (err) {
     showError(t('err.network', { msg: err.message }));
