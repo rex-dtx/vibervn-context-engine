@@ -76,6 +76,13 @@ fn provider_supports_structured_output(provider: &str) -> bool {
     matches!(provider, "google" | "openai")
 }
 
+/// Detect whether an error is a rate-limit (HTTP 429) so the key can be
+/// excluded from retries — waiting won't help within the same request.
+fn is_rate_limited(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("429") && (msg.contains("Too Many Requests") || msg.contains("RESOURCE_EXHAUSTED") || msg.contains("rate") || msg.contains("quota"))
+}
+
 impl LlmClient {
     /// Create a new client. Returns None if api_keys is empty.
     pub fn new(config: &LlmConfig) -> Option<Self> {
@@ -124,13 +131,15 @@ impl LlmClient {
     }
 
     /// Send a completion request to the configured LLM provider.
-    /// Rotates through all keys on failure; backs off 2s and retries once more
-    /// before returning the last error.
+    /// Rotates through all keys on failure; keys that hit a rate limit (429)
+    /// are excluded from the retry pass so the request isn't wasted on a
+    /// known-exhausted quota.
     pub async fn complete(&self, system: &str, user: &str, temperature: f32, structured: bool) -> Result<String> {
         let n_keys = self.api_keys.len();
         let start_cursor = self.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
 
         let mut last_err = None;
+        let mut rate_limited: Vec<bool> = vec![false; n_keys];
 
         // First pass — try each key once.
         for offset in 0..n_keys {
@@ -139,17 +148,23 @@ impl LlmClient {
             match self.call_provider(system, user, temperature, structured, key).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
+                    if is_rate_limited(&e) {
+                        rate_limited[key_idx] = true;
+                    }
                     warn!(key_index = key_idx, error = %e, "LLM call failed — trying next key");
                     last_err = Some(e);
                 }
             }
         }
 
-        // All keys failed — backoff 2s and retry once more.
+        // All keys failed — backoff 2s and retry non-rate-limited keys.
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
+            if rate_limited[key_idx] {
+                continue;
+            }
             let key = &self.api_keys[key_idx];
             match self.call_provider(system, user, temperature, structured, key).await {
                 Ok(response) => return Ok(response),
@@ -226,6 +241,7 @@ impl LlmClient {
         let start_cursor = self.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
 
         let mut last_err = None;
+        let mut rate_limited: Vec<bool> = vec![false; n_keys];
 
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
@@ -233,6 +249,9 @@ impl LlmClient {
             match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key, prompt_cache_key).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
+                    if is_rate_limited(&e) {
+                        rate_limited[key_idx] = true;
+                    }
                     warn!(key_index = key_idx, error = %e, "LLM tool-call failed — trying next key");
                     last_err = Some(e);
                 }
@@ -243,6 +262,9 @@ impl LlmClient {
 
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
+            if rate_limited[key_idx] {
+                continue;
+            }
             let key = &self.api_keys[key_idx];
             match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key, prompt_cache_key).await {
                 Ok(response) => return Ok(response),
