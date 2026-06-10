@@ -149,9 +149,10 @@ pub async fn rerank(
     }
 
     let chunks_text = entries.join("\n---\n");
+    let query_json = serde_json::to_string(query).unwrap_or_else(|_| format!("\"{}\"", query));
     let user_prompt = if structured {
         format!(
-            "Query: {query}\n\nChunks:\n{chunks_text}\n\n\
+            "Query: {query_json}\n\nChunks:\n{chunks_text}\n\n\
              Now rank the chunks by relevance. Respond with a JSON object \
              {{\"ranked_indices\": [ ... ]}} whose array holds objects — \
              {{\"chunk_index\":index,\"lines\":[[start,end]]}} to narrow, or {{\"chunk_index\":index,\"keep\":\"full\"}} \
@@ -159,7 +160,7 @@ pub async fn rerank(
         )
     } else {
         format!(
-            "Query: {query}\n\nChunks:\n{chunks_text}\n\n\
+            "Query: {query_json}\n\nChunks:\n{chunks_text}\n\n\
              Now rank the chunks by relevance. \
              Write the opening tag <ranked_indices>, then a JSON array of objects — \
              {{\"chunk_index\":index,\"lines\":[[start,end]]}} to narrow, or {{\"chunk_index\":index,\"keep\":\"full\"}} \
@@ -197,7 +198,7 @@ pub async fn rerank(
 
 // ─── Agentic RAG rerank ──────────────────────────────────────────────────
 
-const AGENTIC_HISTORY_BYTE_CAP: usize = 200_000;
+const AGENTIC_HISTORY_BYTE_CAP: usize = 1_000_000;
 
 fn agentic_tool_definitions() -> Vec<ToolDef> {
     vec![
@@ -494,10 +495,11 @@ async fn run_agentic_loop<B: AgenticBackend>(
     let system = "You are a code search relevance agent. \
         You are given a query and numbered code chunks with metadata. \
         Your ONLY job is to select relevant chunks via tools. NEVER answer the query. NEVER explain or summarize.\n\
+        YOUR FIRST RESPONSE MUST BE a call to the `add_chunks` tool. No exceptions. No text. Call `add_chunks` immediately.\n\
         WORKFLOW — strict alternating cadence:\n\
         1. Call add_chunks ONCE with ALL relevant initial chunks (most relevant first). OMIT irrelevant chunks.\n\
         2. Call query to search for RELATED code that is NOT in the initial chunks (callers, callees, dependencies, implementations, tests, types). You MUST do this at least once to cover the full blast radius.\n\
-        3. Call add_chunks ONCE with ALL relevant chunks from those query results. This is your ONLY chance to select from these results — you cannot go back.\n\
+        3. Call add_chunks ONCE with ONLY the chunks from those query results that are DIRECTLY relevant to the ORIGINAL user query (shown at the top). Do NOT add chunks just because they appeared in query results — most results will be tangential. Be highly selective.\n\
         4. Repeat steps 2-3 with a DIFFERENT query string each time.\n\
         The pattern is always: add_chunks → query → add_chunks → query → ...\n\
         You CANNOT call add_chunks twice in a row. After each add_chunks you MUST either call query or stop.\n\
@@ -506,12 +508,15 @@ async fn run_agentic_loop<B: AgenticBackend>(
         You MUST use query to find related code: callers of key functions, type definitions, trait implementations, \
         sibling modules, test files, configuration, and anything else needed to fully understand the query topic. \
         Stopping after just the initial chunks gives an incomplete answer.\n\
+        RELEVANCE FILTER: Every chunk you add MUST directly help answer the ORIGINAL user query. \
+        Query results often contain tangentially related code — do NOT blindly add all results. \
+        Ask yourself: \"Does this chunk contain information the user needs to answer their query?\" If not, skip it.\n\
         RULES:\n\
         - For each chunk, you MUST specify either `lines` (to prune to specific line ranges) or `keep: \"all\"` (to keep the entire chunk). Never omit both.\n\
-        - PRECISION REQUIREMENT: Use `lines` to select ONLY the specific line ranges that answer the query. \
-        `keep: \"all\"` should ONLY be used when the ENTIRE chunk (every single line) is directly relevant. \
-        For most chunks, only a subset of lines matter — use `lines: [[start, end], ...]` with the absolute line numbers shown in the chunk to pick exactly those ranges. \
-        Being precise with line ranges produces better results and conserves your character budget.\n\
+        - LINE PRECISION IS MANDATORY: Default to using `lines` to select ONLY the specific line ranges that answer the query. \
+        `keep: \"all\"` is ONLY for chunks where literally EVERY line is relevant (rare — typically only for short chunks <20 lines). \
+        For most chunks, only a portion matters — use `lines: [[start, end], ...]` with the absolute line numbers shown in the chunk. \
+        Adding entire large chunks wastes your character budget and dilutes the results with irrelevant code.\n\
         - You have a limited query budget and a character budget for total added content.\n\
         - Each query MUST use a different information_request string. Repeating the same query is not allowed.\n\
         - You may respond with ONLY the text \"[DONE]\" (nothing else) ONLY after you have called query at least once and are confident the results fully cover the query topic.";
@@ -534,9 +539,11 @@ async fn run_agentic_loop<B: AgenticBackend>(
         entries.push(entry);
     }
 
+    let query_json = serde_json::to_string(query).unwrap_or_else(|_| format!("\"{}\"", query));
+
     let chunks_text = entries.join("\n---\n");
     let user_prompt = format!(
-        "Query: {query}\n\nChunks:\n{chunks_text}\n\n\
+        "Query: {query_json}\n\nChunks:\n{chunks_text}\n\n\
          <system-reminder>\n\
          You MUST call `add_chunks` now to select ALL relevant chunks from the list above (most relevant first). \
          Do NOT respond with text. Use the add_chunks tool.\n\
@@ -591,8 +598,9 @@ async fn run_agentic_loop<B: AgenticBackend>(
     let max_iterations = (query_budget as usize).saturating_mul(4).max(12);
 
     for iteration in 0..max_iterations {
-        // Enforce byte cap
-        if estimate_history_bytes(&messages) > AGENTIC_HISTORY_BYTE_CAP {
+        // Enforce byte cap — but always allow at least the first turn so the
+        // agent can select from the initial chunks even when the prompt is large.
+        if iteration > 0 && estimate_history_bytes(&messages) > AGENTIC_HISTORY_BYTE_CAP {
             tracing::info!(iteration, "agentic rerank: history byte cap reached, stopping");
             exit = LoopExit::ByteCap;
             break;
@@ -758,10 +766,13 @@ async fn run_agentic_loop<B: AgenticBackend>(
                         }
                     } else {
                         Some(
-                            "<system-reminder>\n\
-                             You MUST call `add_chunks` now to select ALL relevant chunks from the results above. \
-                             Do NOT respond with text. Use the add_chunks tool.\n\
-                             </system-reminder>".to_owned()
+                            format!(
+                                "<system-reminder>\n\
+                                 You MUST call `add_chunks` now. ONLY add chunks that are DIRECTLY relevant to the ORIGINAL query: {query_json}\n\
+                                 Do NOT add all query results — most will be tangential. Be highly selective. \
+                                 Use `lines` to prune chunks to relevant ranges. `keep: \"all\"` only for short chunks where every line matters.\n\
+                                 </system-reminder>"
+                            )
                         )
                     };
                     match nudge {
