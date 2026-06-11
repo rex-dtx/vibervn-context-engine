@@ -2162,21 +2162,8 @@ async function planCheckout(packageId) {
       created_at: Date.now(),
     }));
 
-    // Build hidden form and submit to SePay
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.action = data.checkout_url;
-    form.target = '_blank';
-    for (const [k, v] of Object.entries(data.fields)) {
-      const input = document.createElement('input');
-      input.type = 'hidden';
-      input.name = k;
-      input.value = v;
-      form.appendChild(input);
-    }
-    document.body.appendChild(form);
-    form.submit();
-    document.body.removeChild(form);
+    // Redirect to SePay checkout page (backend already did the POST)
+    window.open(data.redirect_url, '_blank');
 
     planStartPolling();
   } catch (e) {
