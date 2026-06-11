@@ -1208,6 +1208,8 @@ const STR = {
   'plan.purchased.remove': { en: `Remove`, vi: `Xóa`, zh: `移除` },
   'plan.purchased.notFound': { en: `Invoice not found or payment incomplete.`, vi: `Không tìm thấy invoice hoặc chưa thanh toán.`, zh: `未找到发票或付款未完成。` },
   'plan.purchased.added': { en: `Added!`, vi: `Đã thêm!`, zh: `已添加！` },
+  'plan.purchased.usage': { en: `{remaining} / {budget}`, vi: `{remaining} / {budget}`, zh: `{remaining} / {budget}` },
+  'plan.purchased.usageLoading': { en: `Loading usage…`, vi: `Đang tải usage…`, zh: `正在加载用量…` },
 
   // Repositories
   'repos.placeholder': { en: `e.g. {path}`, vi: `vd. {path}`, zh: `例如 {path}` },
@@ -2382,6 +2384,7 @@ function renderPurchasedPlans() {
           <button class="plan-copy-key-btn text-blue-500 hover:text-blue-400 text-xs" data-key="${escHtml(p.proxy_key || '')}">${t('action.copy')}</button>
         </div>
         <div class="text-xs text-gray-400 dark:text-wiki-text-muted mt-1">${escHtml(p.base_url)} · ${dateStr} ${expiryHtml}</div>
+        <div class="plan-usage-row mt-2" data-proxy-key="${escHtml(p.proxy_key || '')}"></div>
       </div>
       <div class="flex items-center gap-2 ml-4">
         <button class="plan-row-apply px-2 py-1 text-xs bg-blue-600 dark:bg-wiki-border-active/20 dark:border dark:border-wiki-border-active text-white dark:text-wiki-link rounded hover:bg-blue-700 dark:hover:bg-wiki-border-active/30">${t('plan.apply')}</button>
@@ -2390,6 +2393,53 @@ function renderPurchasedPlans() {
       </div>
     </div>`;
   }).join('');
+  fetchAllPlanUsage();
+}
+
+function renderUsageBar(label, remaining, budget) {
+  const used = budget - remaining;
+  const pct = budget > 0 ? Math.min(100, Math.round((used / budget) * 100)) : 0;
+  const fmt = (n) => n.toLocaleString();
+  return `<div class="flex items-center gap-2">
+    <span class="text-xs text-gray-500 dark:text-wiki-text-muted w-12">${escHtml(label)}</span>
+    <span class="inline-block w-24 h-1.5 bg-gray-200 dark:bg-wiki-border rounded overflow-hidden">
+      <span class="block h-full ${pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-blue-600 dark:bg-wiki-border-active'} rounded transition-[width] duration-200" style="width:${pct}%"></span>
+    </span>
+    <span class="text-xs text-gray-400 dark:text-wiki-text-muted">${fmt(remaining)} / ${fmt(budget)}</span>
+  </div>`;
+}
+
+function fetchAllPlanUsage() {
+  const rows = document.querySelectorAll('.plan-usage-row[data-proxy-key]');
+  rows.forEach(row => {
+    const key = row.dataset.proxyKey;
+    if (!key) return;
+    fetchPlanUsage(row, key);
+  });
+}
+
+async function fetchPlanUsage(el, proxyKey) {
+  try {
+    const res = await fetch('/api/plan/usage', {
+      headers: { 'Authorization': `Bearer ${proxyKey}` }
+    });
+    if (!res.ok) { el.innerHTML = ''; return; }
+    const data = await res.json();
+    el.innerHTML = `<div class="space-y-1">
+      ${renderUsageBar('Voyage', data.voyage_remaining, data.voyage_budget)}
+      ${renderUsageBar('OpenAI', data.openai_remaining, data.openai_budget)}
+    </div>`;
+    // Sync expires_at from server to localStorage
+    const plans = loadPurchasedPlans();
+    const plan = plans.find(p => p.proxy_key === proxyKey);
+    if (plan && data.expires_at) {
+      const serverExpiry = new Date(data.expires_at).getTime();
+      if (plan.expires_at !== serverExpiry) {
+        plan.expires_at = serverExpiry;
+        savePurchasedPlans(plans);
+      }
+    }
+  } catch (_) { el.innerHTML = ''; }
 }
 
 async function planLookupInvoice() {

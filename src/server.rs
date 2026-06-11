@@ -194,6 +194,7 @@ pub fn build_router(
         .route("/api/plan/packages", get(plan_get_packages))
         .route("/api/plan/checkout", post(plan_post_checkout))
         .route("/api/plan/orders/:invoice/status", get(plan_get_order_status))
+        .route("/api/plan/usage", get(plan_get_usage))
         .route("/mcp-repo/:repo_id", any(handle_repo_mcp))
         .merge(Router::new().nest_service("/mcp", mcp_service))
         .with_state(state)
@@ -1344,5 +1345,40 @@ async fn plan_get_order_status(
         .status(status)
         .header("content-type", "application/json")
         .body(axum::body::Body::from(body_bytes))
+        .unwrap()
+}
+
+async fn plan_get_usage(headers: HeaderMap) -> Response {
+    let base = plan_admin_base();
+    let url = format!("{base}/api/usage");
+
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let res = match plan_http_client()
+        .get(&url)
+        .header(header::AUTHORIZATION, &auth)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("admin gateway unreachable: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = res.bytes().await.unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body))
         .unwrap()
 }
