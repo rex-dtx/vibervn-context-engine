@@ -1079,6 +1079,12 @@
 let cfg = null;
 let saveTimer = null;
 let indexStatuses = {}; // keyed by repo path
+// Repos the user triggered that the consumer hasn't picked up yet. The backend
+// has no "queued" state (only Idle/Indexing/Error), so /api/index-status reports
+// a waiting repo as plain `idle` — without this client-side set the optimistic
+// "Queued…" label gets clobbered by the next poll. reconcileQueue() keeps it
+// honest so nothing sticks at "Queued…" forever.
+let queuedRepos = new Set(); // repo paths, same key form as indexStatuses
 let indexPollTimer = null;
 let repoFilter = '';
 // True while a PUT /api/config is actually in flight. Combined with a pending
@@ -1599,8 +1605,27 @@ function startIndexPolling() {
   pollIndexStatus();
 }
 
+// Drop repos from the client-side queue once the server's truth makes "Queued…"
+// wrong. Called from updateRepoIndexUI (i.e. every poll). A repo leaves the queue
+// when: (a) it's now actually indexing — the consumer picked it up; (b) it
+// errored; (c) it was removed from config; or (d) the consumer is fully idle
+// (nothing is `indexing`), meaning the queue already drained or a fast repo
+// finished between polls — keeping it queued would strand it at "Queued…".
+function reconcileQueue() {
+  if (queuedRepos.size === 0) return;
+  const known = (cfg && cfg.repos) ? new Set(cfg.repos) : new Set();
+  const anyIndexing = Object.values(indexStatuses).some(s => s && s.state === 'indexing');
+  for (const repo of [...queuedRepos]) {
+    const s = indexStatuses[repo];
+    if (!known.has(repo)) { queuedRepos.delete(repo); continue; }
+    if (s && (s.state === 'indexing' || s.state === 'error')) { queuedRepos.delete(repo); continue; }
+    if (!anyIndexing) { queuedRepos.delete(repo); }
+  }
+}
+
 function updateRepoIndexUI() {
   if (!cfg || !cfg.repos) return;
+  reconcileQueue();
   cfg.repos.forEach((repo) => {
     const statusEl = document.getElementById('repo-status-' + encodeRepoId(repo));
     const btnEl = document.getElementById('repo-index-btn-' + encodeRepoId(repo));
@@ -1608,6 +1633,18 @@ function updateRepoIndexUI() {
     if (!statusEl || !btnEl) return;
     const s = indexStatuses[repo];
     statusEl.className = 'text-xs text-gray-400 dark:text-wiki-text-muted whitespace-nowrap';
+    // Queued: user triggered it, but the (single, sequential) consumer is still
+    // busy with another repo. The server reports it as idle / not-yet-known, so
+    // this branch must win over the no-status and idle branches below. A run that
+    // hasn't started can't be cancelled, so the Index button stays disabled.
+    if (queuedRepos.has(repo)) {
+      statusEl.innerHTML = '<span class="animate-pulse text-blue-500 dark:text-wiki-link">' + escHtml(t('repo.queued')) + '</span>';
+      btnEl.disabled = true;
+      btnEl.textContent = t('repo.index');
+      btnEl.classList.remove('cancel-state');
+      if (showBtn) showBtn.classList.add('hidden');
+      return;
+    }
     if (!s) {
       statusEl.textContent = '';
       btnEl.disabled = false;
@@ -1820,11 +1857,16 @@ function renderRepos() {
       }
       btn.disabled = true;
       const statusEl = document.getElementById('repo-status-' + repoId);
-      if (statusEl) statusEl.innerHTML = '<span class="animate-pulse text-blue-500 dark:text-wiki-link">' + escHtml(t('repo.queued')) + '</span>';
+      // Enqueue optimistically and render through the central path so the
+      // "Queued…" badge survives the immediate poll below (reconcileQueue keeps
+      // it only while another repo is actually indexing).
+      queuedRepos.add(repo);
+      updateRepoIndexUI();
       try {
         await fetch('/api/repos/' + repoId + '/index', { method: 'POST' });
         await pollIndexStatus();
       } catch (e) {
+        queuedRepos.delete(repo);
         if (statusEl) statusEl.innerHTML = '<span class="text-red-500">' + escHtml(t('repo.error')) + '</span>';
         btn.disabled = false;
       }
@@ -4193,6 +4235,16 @@ document.getElementById('btn-index-all').addEventListener('click', async () => {
     ));
   } else {
     btn.textContent = t('repos.indexing');
+    // Enqueue every repo that isn't already running, so the row list shows one
+    // repo with a progress bar and the rest holding at "Queued…" as the single
+    // consumer drains them one by one.
+    if (cfg && Array.isArray(cfg.repos)) {
+      cfg.repos.forEach((repo) => {
+        const s = indexStatuses[repo];
+        if (!s || s.state !== 'indexing') queuedRepos.add(repo);
+      });
+      updateRepoIndexUI();
+    }
     try {
       await fetch('/api/index-all', { method: 'POST' });
     } catch (_) {}
