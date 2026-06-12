@@ -224,12 +224,19 @@ async fn acquire_repo_db_if_indexed(
     state: &AppState,
     repo: &str,
 ) -> Result<Option<Surreal<Db>>, Response> {
-    store::open_if_indexed(&state.repo_dbs, &state.data_dir, repo)
+    let generation = state.settings.read().await.repo_generation(repo);
+    store::open_if_indexed(&state.repo_dbs, &state.data_dir, repo, generation)
         .await
         .map_err(|e| {
             let body = json!({ "error": format!("failed to open index DB: {e}") });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
         })
+}
+
+/// Current on-disk index generation for `repo` from the live settings handle.
+/// The read guard is dropped before returning, so it never spans a DB `.await`.
+async fn repo_generation(state: &AppState, repo: &str) -> u32 {
+    state.settings.read().await.repo_generation(repo)
 }
 
 /// Map a `store::ops` error to a 500 JSON response.
@@ -287,6 +294,16 @@ async fn put_config(
 
     // Server always stamps the current version regardless of what the client sent.
     settings.version = CURRENT_VERSION;
+
+    // `repo_generations` is SERVER-OWNED bookkeeping (bumped only by the delete
+    // handler). Discard whatever the client sent and preserve the live in-memory
+    // map — otherwise the UI's "Xóa repo" flow (DELETE bumps the counter, then PUT
+    // /api/config with the config it loaded *before* the bump) would silently
+    // clobber the bump, and the re-added repo would reuse the just-deleted (and
+    // possibly still-draining) directory. The live handle already reflects the
+    // bump because the delete handler persisted to disk AND memory before
+    // responding, and the UI awaits the DELETE before PUTting.
+    settings.repo_generations = state.settings.read().await.repo_generations.clone();
 
     // Validate voyage_base_url if provided.
     if let Some(ref url) = settings.embedding.voyage_base_url {
@@ -455,6 +472,10 @@ async fn delete_repo_index(
         Err(r) => return r,
     };
 
+    // Resolve the generation BEFORE the bump — this is the directory currently on
+    // disk that we must remove. The read guard is dropped immediately.
+    let current_generation = repo_generation(&state, &repo).await;
+
     // Cancel any in-progress indexing, wait for it to finish, then drop the
     // cached DB handle. This guarantees no pipeline holds a RocksDB lock on
     // the directory when we attempt to remove it.
@@ -464,26 +485,76 @@ async fn delete_repo_index(
     // the user's perspective regardless of whether the directory removal succeeds.
     state.index_engine.clear_repo_index(&repo).await;
 
-    // Remove the on-disk directory, serialized against `open_db` via the per-repo
-    // open gate (see store::remove_index_dir). Holding that gate across the
-    // retry loop is what prevents a concurrent/immediate re-index from racing the
-    // cleanup: the re-index's get_or_open blocks on the gate until the directory
-    // is fully gone, then opens a fresh DB on a clean path. Without it, the old
-    // detached cleaner could delete files out from under a freshly opened RocksDB
-    // (or collide with the still-draining async LOCK release), producing the
-    // repeating `open surrealdb` errors seen on re-index after "Remove Indexes".
-    let removed = store::remove_index_dir(&state.data_dir, &repo).await;
+    // Bump the generation and persist (disk FIRST, then memory — mirroring
+    // put_config's ordering) BEFORE touching the old directory. Ordering is the fix
+    // for a real incident: the old code removed the directory first (a gated, ~30s
+    // Windows+Defender lock-drain retry loop) and bumped only afterwards. A re-index
+    // triggered during that window read the *old* generation (bump not yet durable)
+    // and parked behind the same per-repo open gate the removal held — wedging the UI
+    // in an indeterminate "Indexing…" with a dead Cancel, then failing with "open
+    // surrealdb" once it recreated the still-draining old path. Persisting the bump
+    // first guarantees a concurrent re-index resolves the NEW generation (a pristine
+    // path the draining handle never touched) and opens immediately. Persisting to
+    // memory before responding also lets the UI's subsequent "Xóa repo" PUT
+    // /api/config preserve the bump (it reads repo_generations from the live handle;
+    // see put_config).
+    let next_generation = current_generation.saturating_add(1);
+    let target = config_path(&state.home_dir);
+    let to_write = {
+        let mut s = state.settings.read().await.clone();
+        s.repo_generations
+            .insert(crate::store::normalize_repo_path(&repo), next_generation);
+        s
+    };
+    let persist = tokio::task::spawn_blocking({
+        let to_write = to_write.clone();
+        move || write_settings_atomic(&target, &to_write)
+    })
+    .await;
+    match persist {
+        Ok(Ok(())) => {
+            // Disk write succeeded — now swap memory under the write lock.
+            state
+                .settings
+                .write()
+                .await
+                .repo_generations
+                .insert(crate::store::normalize_repo_path(&repo), next_generation);
+        }
+        Ok(Err(e)) => {
+            // Persisting the bump failed. Without a durable bump a re-index could
+            // reuse the old generation path — and we have NOT removed it yet, so the
+            // old index is intact. Surface the error so the user can retry rather
+            // than silently degrade.
+            let body = json!({ "error": format!("failed to persist index generation: {e}") });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+        }
+        Err(join_err) => {
+            let body = json!({ "error": format!("internal error: {join_err}") });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+        }
+    }
+
+    // Now remove the OLD generation's directory WITHOUT the open gate. The bump above
+    // is durable, so every future open targets `next_generation` — nothing can race
+    // or recreate `current_generation`, and there is nothing to serialize against. A
+    // gate-held removal here would block the fresh generation's open for the whole
+    // ~30s drain (the gate is keyed by repo, not generation); the ungated removal lets
+    // a re-index proceed on the clean path immediately while this drains in the
+    // foreground. If it outlives the retry budget, the boot-time sweep reclaims it
+    // (store::sweep_stale_generations).
+    let removed = store::remove_old_generation_dir(&state.data_dir, &repo, current_generation).await;
 
     if removed {
         Json(json!({ "status": "ok" })).into_response()
     } else {
-        // The directory is logically removed (handle closed, status cleared,
-        // vector shard evicted) but the OS hasn't released the files yet. Report
-        // it so the UI can surface that a retry may be needed; the gate is no
-        // longer held, so a re-index would race — the user should retry removal.
+        // The directory wasn't fully removed yet (OS still holds the files), but the
+        // generation bump already redirected future indexing to a fresh path — so the
+        // repo is fully usable now and the orphan will be swept on next boot. Report
+        // "pending" for transparency (the UI can note the leftover), not as a blocker.
         Json(json!({
             "status": "pending",
-            "message": "index directory could not be fully removed yet; retry shortly"
+            "message": "old index directory not fully removed yet; it will be reclaimed on next restart"
         }))
         .into_response()
     }
@@ -539,7 +610,7 @@ async fn get_index_stats(
         // from index status), and no phantom DB is created by a read.
         Ok(None) => {
             let embedding_model = state.settings.read().await.embedding.model.clone();
-            let db_dir = store::db_path(&state.data_dir, &repo);
+            let db_dir = store::db_path(&state.data_dir, &repo, repo_generation(&state, &repo).await);
             return Json(json!({
                 "repo": repo,
                 "files": 0,
@@ -582,7 +653,7 @@ async fn get_index_stats(
         None => (None, None),
     };
 
-    let db_dir = store::db_path(&state.data_dir, &repo);
+    let db_dir = store::db_path(&state.data_dir, &repo, repo_generation(&state, &repo).await);
 
     // Take an owned snapshot of only what's needed — guard dropped before the Json call.
     let embedding_model = state.settings.read().await.embedding.model.clone();
@@ -669,7 +740,8 @@ async fn post_ignore_file(
     let _guard = lock.lock().await;
 
     // Open DB handle.
-    let db = match store::get_or_open(&state.repo_dbs, &state.data_dir, &repo).await {
+    let generation = repo_generation(&state, &repo).await;
+    let db = match store::get_or_open(&state.repo_dbs, &state.data_dir, &repo, generation).await {
         Ok(d) => d,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("db: {e}") }))).into_response();
@@ -720,7 +792,8 @@ async fn post_unignore_file(
     let lock = state.index_engine.get_repo_lock_public(&repo).await;
     let _guard = lock.lock().await;
 
-    let db = match store::get_or_open(&state.repo_dbs, &state.data_dir, &repo).await {
+    let generation = repo_generation(&state, &repo).await;
+    let db = match store::get_or_open(&state.repo_dbs, &state.data_dir, &repo, generation).await {
         Ok(d) => d,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("db: {e}") }))).into_response();
@@ -745,7 +818,8 @@ async fn get_ignored_files(
         Ok(r) => r,
         Err(r) => return r,
     };
-    let db = match store::get_or_open(&state.repo_dbs, &state.data_dir, &repo).await {
+    let generation = repo_generation(&state, &repo).await;
+    let db = match store::get_or_open(&state.repo_dbs, &state.data_dir, &repo, generation).await {
         Ok(d) => d,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("db: {e}") }))).into_response();

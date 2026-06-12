@@ -1081,6 +1081,10 @@ let saveTimer = null;
 let indexStatuses = {}; // keyed by repo path
 let indexPollTimer = null;
 let repoFilter = '';
+// Repos whose server-side teardown is in flight. renderRepos() hides them so the
+// row disappears instantly on "Remove Repo" while the slow DELETE runs in the
+// background (see the btn-remove-repo handler).
+const deletingRepos = new Set();
 
 // ─── i18n ──────────────────────────────────────────────────────────────────
 // Client-only locale (en | vi | zh), persisted in localStorage like the theme.
@@ -1238,13 +1242,14 @@ const STR = {
   'repo.index':        { en: `Index`, vi: `Index`, zh: `索引` },
   'repo.queued':       { en: `Queued…`, vi: `Đang chờ…`, zh: `已排队…` },
   'repo.cancelling':   { en: `Cancelling…`, vi: `Đang hủy…`, zh: `正在取消…` },
-  'repo.removing':     { en: `Removing…`, vi: `Đang xóa…`, zh: `正在移除…` },
   'repo.removeIndex':  { en: `Remove Indexes`, vi: `Xóa index`, zh: `移除索引` },
   'repo.removeRepo':   { en: `Remove Repo`, vi: `Xóa repo`, zh: `移除仓库` },
   'repo.notIndexed':   { en: `Not indexed`, vi: `Chưa index`, zh: `未索引` },
   'repo.error':        { en: `Error`, vi: `Lỗi`, zh: `错误` },
   'repo.files':        { en: `{n} files`, vi: `{n} file`, zh: `{n} 个文件` },
   'repo.removeIndexFail': { en: `Failed to remove indexes`, vi: `Xóa index thất bại`, zh: `移除索引失败` },
+  'repo.removeRepoFail': { en: `Failed to remove repo`, vi: `Xóa repo thất bại`, zh: `移除仓库失败` },
+  'toast.removed':     { en: `Removed`, vi: `Đã xóa`, zh: `已移除` },
 
   // Settings — Embedding
   'embed.heading':     { en: `Embedding Provider`, vi: `Embedding Provider`, zh: `嵌入向量提供商` },
@@ -1641,8 +1646,11 @@ function isValidUrl(s) {
   catch { return false; }
 }
 
-function showToast() {
+function showToast(msg) {
   const t = document.getElementById('toast-saved');
+  // Default to "Saved"; the remove flow passes "Removed". Always set explicitly
+  // so a prior custom message never leaks into a later save toast.
+  t.textContent = msg !== undefined ? msg : window.t('toast.saved');
   t.classList.remove('hidden');
   requestAnimationFrame(() => { t.classList.remove('opacity-0'); t.classList.add('opacity-100'); });
   setTimeout(() => {
@@ -1707,7 +1715,9 @@ function renderRepos() {
   empty.classList.add('hidden');
   noMatch.classList.add('hidden');
 
-  const repos = cfg.repos || [];
+  // Hide repos whose teardown is in flight so the row vanishes instantly on
+  // "Remove Repo", even though cfg.repos still holds it until the DELETE resolves.
+  const repos = (cfg.repos || []).filter(r => !deletingRepos.has(r));
   if (repos.length === 0) {
     filterInput.classList.add('hidden');
     empty.classList.remove('hidden');
@@ -1809,8 +1819,13 @@ function renderRepos() {
       e.stopPropagation();
       const repo = btn.dataset.repo;
       const repoId = encodeRepoId(repo);
-      btn.textContent = t('repo.removing');
-      btn.disabled = true;
+      // Optimistic: the server clears in-memory index state immediately but the
+      // on-disk teardown (Windows lock-drain retry loop) can take seconds. Don't
+      // freeze the dropdown on "Đang xóa…" through it — close + toast now, run the
+      // DELETE in the background. The repo row stays (only its index is cleared);
+      // the status badge flips to "Not indexed" via the poll below / background poll.
+      btn.closest('.remove-dropdown').classList.add('hidden');
+      showToast(t('toast.removed'));
       try {
         const res = await fetch('/api/repos/' + repoId + '/index', { method: 'DELETE' });
         if (!res.ok) {
@@ -1819,10 +1834,6 @@ function renderRepos() {
         }
       } catch (err) {
         showError(t('err.network', { msg: err.message }));
-      } finally {
-        btn.textContent = t('repo.removeIndex');
-        btn.disabled = false;
-        btn.closest('.remove-dropdown').classList.add('hidden');
       }
       await pollIndexStatus();
     });
@@ -1833,21 +1844,39 @@ function renderRepos() {
       e.stopPropagation();
       btn.closest('.remove-dropdown').classList.add('hidden');
       const repo = btn.dataset.repo;
-      const idx = parseInt(btn.dataset.idx, 10);
+      // Optimistic removal: the server teardown (cancel in-progress index → drop
+      // RocksDB handle → Windows lock-drain retry loop → generation bump) can take
+      // seconds, and the server itself treats the repo as "functionally gone from
+      // the user's perspective" the moment we ask. So hide the row INSTANTLY via the
+      // deleting set and confirm with a toast, then run the slow work in the
+      // background. We must NOT splice cfg.repos / saveNow until the DELETE resolves:
+      // the server bumps the server-owned generation during DELETE and a PUT /api/config
+      // that lands first would clobber the bump (see put_config), letting a re-add reuse
+      // the still-draining directory.
+      deletingRepos.add(repo);
+      renderRepos();
+      showToast(t('toast.removed'));
       const repoId = encodeRepoId(repo);
-      btn.disabled = true;
       try {
         const res = await fetch('/api/repos/' + repoId + '/index', { method: 'DELETE' });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          showError(data.error || t('repo.removeIndexFail'));
+          showError(data.error || t('repo.removeRepoFail'));
+          deletingRepos.delete(repo);
+          renderRepos();
+          return;
         }
-      } catch (_) {
-        showError(t('repo.removeIndexFail'));
+        // Server teardown + generation bump are durable. Now drop the repo from the
+        // config and persist — DELETE finished first, so the bump survives the PUT.
+        const i = (cfg.repos || []).indexOf(repo);
+        if (i !== -1) cfg.repos.splice(i, 1);
+        deletingRepos.delete(repo);
+        await saveNow();
+      } catch (err) {
+        showError(t('err.network', { msg: err.message }));
+        deletingRepos.delete(repo);
+        renderRepos();
       }
-      cfg.repos.splice(idx, 1);
-      renderRepos();
-      saveNow();
     });
   });
 

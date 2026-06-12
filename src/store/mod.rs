@@ -56,23 +56,40 @@ pub fn sanitize_repo_name(repo_path: &str) -> String {
     }
 }
 
-/// Return the SurrealDB data directory for a given repo.
+/// Return the SurrealDB data directory for a given repo at a given generation.
 ///
-/// Namespaced under `<data_dir>/rocksdb/<sanitized-repo-name>/` (not the legacy
-/// `surreal/` SurrealKV path). The backend swap from SurrealKV to RocksDB
-/// changes the on-disk format, so the old `surreal/<name>` directories are
-/// intentionally left untouched for rollback; a repo opened here for the first
-/// time has no file_meta and triggers a full rebuild via the pipeline's
-/// is_first_run path (embedding cache makes it API-free).
+/// Generation 0 → `<data_dir>/rocksdb/<sanitized-repo-name>/` — byte-for-byte the
+/// legacy layout, so existing on-disk indexes are NOT orphaned when the
+/// `repo_generations` map is introduced (an unlisted repo reads as generation 0).
+/// Generation ≥ 1 → `<data_dir>/rocksdb/<gen>/<sanitized-repo-name>/`. The counter
+/// is bumped on every repo/index delete so the next index lands on a FRESH
+/// directory the just-deleted RocksDB handle never touched — side-stepping the
+/// async LOCK drain (7s+ on Windows under Defender) that otherwise makes an
+/// immediate re-index race the deleted handle's still-held lock.
+///
+/// Namespaced under `rocksdb/` (not the legacy `surreal/` SurrealKV path). The
+/// backend swap from SurrealKV to RocksDB changes the on-disk format, so the old
+/// `surreal/<name>` directories are intentionally left untouched for rollback; a
+/// repo opened here for the first time has no file_meta and triggers a full
+/// rebuild via the pipeline's is_first_run path (embedding cache makes it
+/// API-free).
 ///
 /// `data_dir` is the boot-resolved data directory (CLI > env >
 /// `Settings.data_dir` > builtin default). It is captured once at startup and
 /// MUST NOT be re-read from `Settings` mid-run — open RocksDB handles in
 /// `repo_dbs` and resident vector shards are bound to the boot path; switching
-/// would split-brain reads against writes.
-pub fn db_path(data_dir: &Path, repo_path: &str) -> PathBuf {
+/// would split-brain reads against writes. `generation`, by contrast, IS read
+/// live from `Settings`: it only changes after `close_repo_db` has dropped the
+/// cached handle and `clear_repo_index` has evicted the resident shard, so no
+/// open handle or warmed shard is ever bound to a stale generation.
+pub fn db_path(data_dir: &Path, repo_path: &str, generation: u32) -> PathBuf {
     let name = sanitize_repo_name(repo_path);
-    data_dir.join("rocksdb").join(name)
+    let base = data_dir.join("rocksdb");
+    if generation == 0 {
+        base.join(name)
+    } else {
+        base.join(generation.to_string()).join(name)
+    }
 }
 
 /// Read the stored db_schema_version from index_meta, defaulting to 1
@@ -87,8 +104,8 @@ pub async fn read_db_schema_version(db: &Surreal<Db>) -> u32 {
 /// Open (or create) a SurrealDB database for the given repo.
 /// Runs schema DDL to ensure all tables/indexes exist.
 /// Returns the db handle; the caller is responsible for triggering migrations.
-pub async fn open_db(data_dir: &Path, repo_path: &str) -> Result<Surreal<Db>> {
-    let path = db_path(data_dir, repo_path);
+pub async fn open_db(data_dir: &Path, repo_path: &str, generation: u32) -> Result<Surreal<Db>> {
+    let path = db_path(data_dir, repo_path, generation);
     std::fs::create_dir_all(&path).with_context(|| format!("create db dir {:?}", path))?;
 
     // Retry the RocksDB datastore open: when this path was just released by a
@@ -715,14 +732,45 @@ pub async fn abort_migration(repo: &str) {
 /// The caller MUST have already dropped the cached handle (`close_repo_db`) so
 /// the only thing keeping the LOCK alive is the async shutdown, which the retry
 /// loop waits out. Returns `true` if the directory is gone on return.
-pub async fn remove_index_dir(data_dir: &Path, repo: &str) -> bool {
+pub async fn remove_index_dir(data_dir: &Path, repo: &str, generation: u32) -> bool {
     let repo = normalize_repo_path(repo);
-    let path = db_path(data_dir, &repo);
 
     // Serialize against open_db for this repo. Held across every retry so no
-    // re-index can recreate/open the directory mid-removal.
+    // re-index can recreate/open the directory mid-removal. This matters ONLY for
+    // the self-heal path (open_or_reset_index), which deletes the *current*
+    // generation and then reopens it on the SAME path — a concurrent open of that
+    // same generation would race the delete. The delete handler, by contrast, has
+    // already bumped the generation, so nothing can target the old path anymore;
+    // it uses `remove_old_generation_dir` (no gate) to avoid blocking the fresh
+    // generation's open behind this drain.
     let gate = open_gate(&repo);
     let _open_guard = gate.lock().await;
+
+    remove_dir_with_retry(data_dir, &repo, generation).await
+}
+
+/// Remove a SUPERSEDED generation's directory WITHOUT holding the per-repo open
+/// gate. Safe only after the generation counter has already been bumped and
+/// persisted: once that is durable, every open/path resolution for the repo
+/// targets the new generation, so no concurrent `open_db` can recreate or race
+/// this old path — there is nothing to serialize against. Holding the gate here
+/// would be actively harmful: the gate is keyed by repo (not generation), so a
+/// ~30s Windows+Defender lock drain on the OLD directory would block the FRESH
+/// generation's open for the entire window — wedging a just-triggered re-index in
+/// the indeterminate "Indexing…" state with an unresponsive Cancel, then failing
+/// once the re-index recreated the still-draining old path. If the drain outlives
+/// the retry budget, the leftover is reclaimed by `sweep_stale_generations` on the
+/// next boot. Returns `true` if the directory is gone on return.
+pub async fn remove_old_generation_dir(data_dir: &Path, repo: &str, generation: u32) -> bool {
+    let repo = normalize_repo_path(repo);
+    remove_dir_with_retry(data_dir, &repo, generation).await
+}
+
+/// Shared removal core: `remove_dir_all` with backoff to ride out the async
+/// RocksDB LOCK drain. `repo` is assumed already normalized. Callers decide
+/// whether to hold the per-repo open gate (see the two wrappers above).
+async fn remove_dir_with_retry(data_dir: &Path, repo: &str, generation: u32) -> bool {
+    let path = db_path(data_dir, repo, generation);
 
     if !path.exists() {
         return true;
@@ -753,10 +801,61 @@ pub async fn remove_index_dir(data_dir: &Path, repo: &str) -> bool {
     !still
 }
 
+/// Boot-time sweep of stale per-repo index generations.
+///
+/// Each repo/index delete bumps a repo's generation and moves the next index to a
+/// fresh directory; when the OLD directory's removal failed (Windows held the LOCK
+/// past the retry budget) it is left on disk. Repeated delete+reindex on a stubborn
+/// lock would otherwise let those orphans accumulate without bound — violating the
+/// "disk stays bounded at scale" rule. This sweep reclaims them.
+///
+/// MUST be called at startup BEFORE any RocksDB handle is opened (no entry in
+/// `repo_dbs`, no warmed shard): only then is every directory guaranteed lock-free,
+/// so a `remove_dir_all` can't race a live datastore. For each `(repo, generation)`
+/// it removes every sibling generation directory for that repo EXCEPT the current
+/// one (gen 0 → `rocksdb/<name>`; gen N → `rocksdb/N/<name>`). A directory that
+/// still can't be removed (rare residual OS handle) is skipped, not surfaced as an
+/// error — the next boot retries it.
+///
+/// Scope: only repos still listed in `repos` are swept. Directories for repos fully
+/// forgotten from settings are left untouched (a deeper sweep can be added later if
+/// that becomes a real disk concern).
+pub fn sweep_stale_generations(data_dir: &Path, repos: &[String], generations: &HashMap<String, u32>) {
+    let rocksdb_root = data_dir.join("rocksdb");
+    if !rocksdb_root.exists() {
+        return;
+    }
+
+    for repo in repos {
+        let repo = normalize_repo_path(repo);
+        let current = generations.get(&repo).copied().unwrap_or(0);
+
+        // Candidate stale paths = every generation's directory for this repo other
+        // than `current`. We can't enumerate "all generations ever used", so we
+        // sweep the contiguous range [0, current): every prior generation the
+        // counter has passed through. The live `current` directory is preserved.
+        for prior_gen in 0..current {
+            let stale = db_path(data_dir, &repo, prior_gen);
+            if stale.exists() {
+                match std::fs::remove_dir_all(&stale) {
+                    Ok(()) => info!(path = ?stale, repo = %repo, "swept stale index generation"),
+                    Err(e) => {
+                        // Skip, don't error: a residual OS handle may still hold it.
+                        // The next boot will retry. We only warn so the operator can
+                        // see disk isn't being reclaimed if it persists.
+                        warn!(path = ?stale, error = %e, "could not sweep stale index generation; will retry next boot");
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn get_or_open(
     repo_dbs: &RepoDbMap,
     data_dir: &Path,
     repo: &str,
+    generation: u32,
 ) -> Result<Surreal<Db>> {
     let repo = &normalize_repo_path(repo);
     // Fast path: already cached.
@@ -776,7 +875,7 @@ pub async fn get_or_open(
         return Ok(db.clone());
     }
 
-    let db = open_db(data_dir, repo).await?;
+    let db = open_db(data_dir, repo, generation).await?;
 
     // Check schema version and spawn migration if needed (non-blocking).
     let stored_version = read_db_schema_version(&db).await;
@@ -831,8 +930,9 @@ pub async fn open_or_reset_index(
     repo_dbs: &RepoDbMap,
     data_dir: &Path,
     repo: &str,
+    generation: u32,
 ) -> Result<(Surreal<Db>, bool)> {
-    match get_or_open(repo_dbs, data_dir, repo).await {
+    match get_or_open(repo_dbs, data_dir, repo, generation).await {
         Ok(db) => Ok((db, false)),
         Err(orig) => {
             let normalized = normalize_repo_path(repo);
@@ -844,9 +944,9 @@ pub async fn open_or_reset_index(
 
             // Attempt to delete the on-disk index. Returns false (without deleting)
             // if a live OS handle still holds the LOCK — the safety valve.
-            if remove_index_dir(data_dir, repo).await {
+            if remove_index_dir(data_dir, repo, generation).await {
                 // Directory is gone. Reopen exactly once on the fresh path.
-                match get_or_open(repo_dbs, data_dir, repo).await {
+                match get_or_open(repo_dbs, data_dir, repo, generation).await {
                     Ok(db) => Ok((db, true)),
                     Err(e2) => Err(e2).context("reopen after index reset"),
                 }
@@ -872,18 +972,105 @@ pub async fn open_if_indexed(
     repo_dbs: &RepoDbMap,
     data_dir: &Path,
     repo: &str,
+    generation: u32,
 ) -> Result<Option<Surreal<Db>>> {
     let repo = normalize_repo_path(repo);
     // A cached handle means it's open regardless of the on-disk check below.
     if let Some(db) = repo_dbs.read().await.get(repo.as_str()) {
         return Ok(Some(db.clone()));
     }
-    if !db_path(data_dir, &repo).exists() {
+    if !db_path(data_dir, &repo, generation).exists() {
         return Ok(None);
     }
-    get_or_open(repo_dbs, data_dir, &repo).await.map(Some)
+    get_or_open(repo_dbs, data_dir, &repo, generation).await.map(Some)
 }
 
+
+#[cfg(test)]
+mod generation_paths {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    /// Generation 0 maps to the LEGACY layout (`rocksdb/<name>`, no number segment)
+    /// so existing on-disk indexes are not orphaned. Generation ≥ 1 nests under the
+    /// number (`rocksdb/<gen>/<name>`).
+    #[test]
+    fn db_path_layout_by_generation() {
+        let data_dir = std::path::Path::new("/data");
+        let repo = "/home/user/projects/notepad";
+        let name = sanitize_repo_name(repo);
+
+        let gen0 = db_path(data_dir, repo, 0);
+        assert_eq!(
+            gen0,
+            data_dir.join("rocksdb").join(&name),
+            "generation 0 must be the legacy path with no number segment"
+        );
+
+        let gen1 = db_path(data_dir, repo, 1);
+        assert_eq!(
+            gen1,
+            data_dir.join("rocksdb").join("1").join(&name),
+            "generation 1 must nest the repo under the number segment"
+        );
+
+        let gen7 = db_path(data_dir, repo, 7);
+        assert_eq!(gen7, data_dir.join("rocksdb").join("7").join(&name));
+
+        // Distinct generations never collide on disk.
+        assert_ne!(gen0, gen1);
+        assert_ne!(gen1, gen7);
+    }
+
+    /// The boot sweep removes every prior generation directory for a listed repo
+    /// while preserving the current one. A directory it can't enumerate is simply
+    /// absent (no error). Repos not in the list are left untouched.
+    #[test]
+    fn sweep_removes_prior_generations_keeps_current() {
+        let home = TempDir::new().expect("tempdir");
+        let data_dir = home.path();
+        let repo = "/proj/alpha";
+        let other = "/proj/untracked";
+
+        // Materialise generation dirs 0,1,2 for `repo` and gen 0 for `other`.
+        for g in 0..=2u32 {
+            std::fs::create_dir_all(db_path(data_dir, repo, g)).expect("mk repo gen dir");
+        }
+        std::fs::create_dir_all(db_path(data_dir, other, 0)).expect("mk other gen dir");
+
+        // Current generation of `repo` is 2; `other` is not listed.
+        let mut generations = HashMap::new();
+        generations.insert(normalize_repo_path(repo), 2u32);
+
+        sweep_stale_generations(data_dir, &[repo.to_string()], &generations);
+
+        assert!(!db_path(data_dir, repo, 0).exists(), "gen 0 must be swept");
+        assert!(!db_path(data_dir, repo, 1).exists(), "gen 1 must be swept");
+        assert!(db_path(data_dir, repo, 2).exists(), "current gen 2 must be kept");
+        assert!(
+            db_path(data_dir, other, 0).exists(),
+            "untracked repo's directory must be left untouched"
+        );
+    }
+
+    /// A repo absent from the generations map (or at gen 0) has no prior generations,
+    /// so the sweep is a no-op for it and never touches its live gen-0 directory.
+    #[test]
+    fn sweep_noop_for_generation_zero_repo() {
+        let home = TempDir::new().expect("tempdir");
+        let data_dir = home.path();
+        let repo = "/proj/fresh";
+        std::fs::create_dir_all(db_path(data_dir, repo, 0)).expect("mk gen0");
+
+        sweep_stale_generations(data_dir, &[repo.to_string()], &HashMap::new());
+
+        assert!(
+            db_path(data_dir, repo, 0).exists(),
+            "gen-0 repo with no bump must keep its directory"
+        );
+    }
+}
 
 #[cfg(test)]
 mod isolation_repro {
@@ -909,7 +1096,7 @@ mod isolation_repro {
 
         // The shared cache opens the single authoritative handle.
         let map: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
-        let sa = get_or_open(&map, home.path(), repo).await.expect("shared A");
+        let sa = get_or_open(&map, home.path(), repo, 0).await.expect("shared A");
         assert_eq!(
             ops::count_chunks(&sa).await.unwrap(),
             0,
@@ -920,7 +1107,7 @@ mod isolation_repro {
         // (Under the old SurrealKV backend this silently succeeded with isolated
         // state — the root of the original cross-handle bug. RocksDB's exclusive
         // lock structurally prevents it.)
-        let raw_result = open_db(home.path(), repo).await;
+        let raw_result = open_db(home.path(), repo, 0).await;
         assert!(
             raw_result.is_err(),
             "RocksDB must reject a second concurrent handle on the same path (exclusive lock)"
@@ -928,7 +1115,7 @@ mod isolation_repro {
 
         // ── PART 2: the shared cached handle reads its own writes ───────────────
         // A second get_or_open returns the SAME cached instance (no new lock).
-        let sb = get_or_open(&map, home.path(), repo).await.expect("shared B");
+        let sb = get_or_open(&map, home.path(), repo, 0).await.expect("shared B");
         sb.query(
             "CREATE chunk SET file = '/x/f.rs', line_start = 3, line_end = 4, \
              content = 'y', embedding = [0.5, 0.6, 0.7, 0.8], symbol_ref = NONE;",
@@ -969,7 +1156,7 @@ mod open_concurrency {
             let home = home.path().to_path_buf();
             let repo = repo.clone();
             handles.push(tokio::spawn(async move {
-                get_or_open(&map, &home, &repo).await.map(|_| ())
+                get_or_open(&map, &home, &repo, 0).await.map(|_| ())
             }));
         }
         for h in handles {
@@ -991,18 +1178,18 @@ mod open_concurrency {
         let map: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
 
         // Never indexed → None, and no directory materialized.
-        let res = open_if_indexed(&map, home.path(), repo).await.expect("ok");
+        let res = open_if_indexed(&map, home.path(), repo, 0).await.expect("ok");
         assert!(res.is_none(), "unindexed repo must return None");
         assert!(
-            !db_path(home.path(), repo).exists(),
+            !db_path(home.path(), repo, 0).exists(),
             "open_if_indexed must NOT create the DB directory for an unindexed repo"
         );
         assert_eq!(map.read().await.len(), 0, "no handle cached for an unindexed repo");
 
         // After a real open, the directory exists → Some, and the handle is shared.
-        let _opened = get_or_open(&map, home.path(), repo).await.expect("open");
-        assert!(db_path(home.path(), repo).exists());
-        let res2 = open_if_indexed(&map, home.path(), repo).await.expect("ok");
+        let _opened = get_or_open(&map, home.path(), repo, 0).await.expect("open");
+        assert!(db_path(home.path(), repo, 0).exists());
+        let res2 = open_if_indexed(&map, home.path(), repo, 0).await.expect("ok");
         assert!(res2.is_some(), "indexed repo must return Some");
     }
 }
@@ -1022,14 +1209,14 @@ mod reset_index {
         let repo = "/proj/repo_healthy";
         let map: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
 
-        let (db, was_reset) = open_or_reset_index(&map, home.path(), repo)
+        let (db, was_reset) = open_or_reset_index(&map, home.path(), repo, 0)
             .await
             .expect("healthy open");
         assert!(!was_reset, "a healthy fresh repo must not be reset");
         assert_eq!(ops::count_chunks(&db).await.unwrap(), 0, "fresh DB must be empty");
-        assert!(db_path(home.path(), repo).exists(), "index directory must exist");
+        assert!(db_path(home.path(), repo, 0).exists(), "index directory must exist");
 
-        let (_db2, was_reset2) = open_or_reset_index(&map, home.path(), repo)
+        let (_db2, was_reset2) = open_or_reset_index(&map, home.path(), repo, 0)
             .await
             .expect("second open");
         assert!(!was_reset2, "a cached healthy repo must not be reset");
@@ -1051,10 +1238,10 @@ mod reset_index {
         let repo = "/proj/repo_locked";
 
         // Hold the exclusive lock with a raw handle (not in the map).
-        let _holder = open_db(home.path(), repo).await.expect("hold lock");
+        let _holder = open_db(home.path(), repo, 0).await.expect("hold lock");
 
         let map: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
-        let res = open_or_reset_index(&map, home.path(), repo).await;
+        let res = open_or_reset_index(&map, home.path(), repo, 0).await;
         assert!(
             res.is_err(),
             "a live lock must block the reset and surface the original error (no data loss)"
@@ -1062,13 +1249,48 @@ mod reset_index {
 
         // The directory must still exist — the safety valve did not delete it.
         assert!(
-            db_path(home.path(), repo).exists(),
+            db_path(home.path(), repo, 0).exists(),
             "the contended index directory must NOT be destroyed"
         );
 
         // Keep the holder alive until here so the lock is genuinely held during the
         // heal attempt above.
         drop(_holder);
+    }
+
+    /// REGRESSION (delete-then-reindex stuck on "Indexing…"): the delete handler bumps
+    /// the generation, then removes the OLD generation's directory via
+    /// `remove_old_generation_dir`, which must NOT hold the per-repo open gate. If it
+    /// did, a re-index that opens the FRESH generation (which acquires the same
+    /// repo-keyed gate) would block behind the old directory's lock drain. Here we
+    /// hold the open gate explicitly and assert the ungated removal still completes —
+    /// i.e. it never tries to take the gate.
+    #[tokio::test]
+    async fn remove_old_generation_dir_does_not_take_open_gate() {
+        let home = TempDir::new().unwrap();
+        let repo = "/proj/repo_gen_swap";
+
+        // Materialize an old-generation directory with no live handle (nothing holds
+        // the RocksDB LOCK), so removal itself can succeed.
+        let old_path = db_path(home.path(), repo, 0);
+        std::fs::create_dir_all(&old_path).unwrap();
+        std::fs::write(old_path.join("CURRENT"), b"stale\n").unwrap();
+
+        // Hold the per-repo open gate for the entire removal — as a concurrent open of
+        // the fresh generation would. A gated removal would deadlock/serialize here;
+        // the ungated one must complete regardless.
+        let gate = open_gate(&normalize_repo_path(repo));
+        let _held = gate.lock().await;
+
+        let removed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            remove_old_generation_dir(home.path(), repo, 0),
+        )
+        .await
+        .expect("ungated removal must not block on the held open gate");
+
+        assert!(removed, "old generation directory must be removed");
+        assert!(!old_path.exists(), "old generation directory must be gone");
     }
 
     /// CORRUPT-BUT-UNLOCKED: a directory with a malformed RocksDB `CURRENT` (pointing
@@ -1086,12 +1308,12 @@ mod reset_index {
 
         // Materialize the index directory with a garbage CURRENT file. No handle is
         // opened, so no LOCK is held — removal will succeed.
-        let path = db_path(home.path(), repo);
+        let path = db_path(home.path(), repo, 0);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("CURRENT"), b"GARBAGE-NOT-A-MANIFEST\n").unwrap();
 
         let map: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
-        let (db, was_reset) = open_or_reset_index(&map, home.path(), repo)
+        let (db, was_reset) = open_or_reset_index(&map, home.path(), repo, 0)
             .await
             .expect("corrupt dir must heal and reopen");
         assert!(
@@ -1350,7 +1572,7 @@ mod migration_tests {
     async fn migration_stamps_version_2_after_completion() {
         let home = TempDir::new().unwrap();
         let repo = "/test/migration_repo";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Confirm we start at version 1 (fresh DB has no version key).
         let before = read_db_schema_version(&db).await;
@@ -1368,7 +1590,7 @@ mod migration_tests {
     async fn migration_idempotent_on_v2_db() {
         let home = TempDir::new().unwrap();
         let repo = "/test/idempotent_repo";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Run migration twice.
         run_migration_v1_to_v2(&db).await.unwrap();
@@ -1385,7 +1607,7 @@ mod migration_tests {
     async fn migration_resumes_from_cursor() {
         let home = TempDir::new().unwrap();
         let repo = "/test/cursor_repo";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Migration on empty DB should complete without error.
         run_migration_v1_to_v2(&db).await.unwrap();
@@ -1442,7 +1664,7 @@ mod schemaless_tests {
 
         let home = TempDir::new().unwrap();
         let repo = "/test/schemaless_roundtrip";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         let embeddings: Vec<Vec<f32>> = vec![
             emb_1024(1.0),
@@ -1554,7 +1776,7 @@ mod schemaless_tests {
     async fn needs_rebuild_flag_lifecycle() {
         let home = TempDir::new().unwrap();
         let repo = "/test/needs_rebuild";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Set needs_rebuild to "1".
         ops::set_meta(&db, "needs_rebuild", "1").await.unwrap();
@@ -1586,7 +1808,7 @@ mod schemaless_tests {
 
         let home = TempDir::new().unwrap();
         let repo = "/test/is_not_none";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Write 2 chunks with real 1024-dim embeddings.
         for i in 0..2_usize {
@@ -1707,7 +1929,7 @@ mod schemaless_tests {
 
         let home = TempDir::new().unwrap();
         let repo = "/test/bytes_format_read";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Insert a chunk with embedding stored as Value::Bytes (the v5 format),
         // built natively exactly like flush_chunk_batch does.
@@ -1749,7 +1971,7 @@ mod schemaless_tests {
 
         let home = TempDir::new().unwrap();
         let repo = "/test/mixed_format";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Old-format row: array<float> via literal INSERT.
         let old_emb = emb_1024(1.0);
@@ -1792,7 +2014,7 @@ mod schemaless_tests {
     async fn migration_v4_to_v5_converts_and_is_idempotent() {
         let home = TempDir::new().unwrap();
         let repo = "/test/v4_to_v5";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Seed rows in OLD array<float> format.
         let seeds = [11.0_f32, 22.0, 33.0];
@@ -1838,7 +2060,7 @@ mod schemaless_tests {
     async fn migration_v4_to_v5_resumes_from_cursor() {
         let home = TempDir::new().unwrap();
         let repo = "/test/v4_to_v5_resume";
-        let db = open_db(home.path(), repo).await.unwrap();
+        let db = open_db(home.path(), repo, 0).await.unwrap();
 
         // Seed old-format rows.
         for i in 0..5_usize {

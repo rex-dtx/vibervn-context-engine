@@ -72,8 +72,8 @@ async fn test_get_creates_default() {
 
     let body: serde_json::Value = res.json().await.expect("parse json");
 
-    // version should be CURRENT_VERSION (= 7 after data_dir + embeddings_dir + mcp_tools + custom_extensions + index_ignore_filenames + voyage_base_url migrations)
-    assert_eq!(body["version"], 7);
+    // version should be CURRENT_VERSION (= 8 after data_dir + embeddings_dir + mcp_tools + custom_extensions + index_ignore_filenames + voyage_base_url + repo_generations migrations)
+    assert_eq!(body["version"], 8);
 
     // repos should be an empty array
     assert!(body["repos"].as_array().map(|a| a.is_empty()).unwrap_or(false));
@@ -152,7 +152,7 @@ async fn test_put_round_trips() {
     assert_eq!(get_body.repos, expected_repos);
     assert_eq!(get_body.embedding.model, "voyage-code-3");
     assert_eq!(get_body.llm.rerank_model, "gemini-2.0-flash");
-    assert_eq!(get_body.version, 7);
+    assert_eq!(get_body.version, 8);
 }
 
 // ─── Test 3 (Unix only): file mode bits should be 0o600 ───────────────────
@@ -537,7 +537,7 @@ async fn test_delete_repo_index_removes_directory() {
     // Pre-create the DB directory and open a handle via get_or_open so a real
     // RocksDB LOCK file exists — this is what triggers OS error 32 if not
     // closed before deletion.
-    let db_dir = store::db_path(home.path(), repo_path);
+    let db_dir = store::db_path(home.path(), repo_path, 0);
     std::fs::create_dir_all(&db_dir).expect("create db dir");
 
     // Open a DB handle through the server by triggering an index (which calls
@@ -591,6 +591,97 @@ async fn test_delete_repo_index_removes_directory() {
     }
 }
 
+// ─── Test 7a': DELETE bumps the per-repo generation and the next index uses a
+// fresh directory; the UI's delete-then-PUT-config flow must NOT clobber the bump ─
+//
+// Proves the root-cause fix: after a delete the repo's generation counter advances,
+// the new generation's directory is what GET /api/config reports, and a subsequent
+// PUT /api/config (which the "Xóa repo" UI sends with a stale, generation-less body)
+// preserves the server-owned counter instead of resetting it to 0.
+#[tokio::test]
+async fn test_delete_bumps_generation_and_put_preserves_it() {
+    use context_engine_rs::store;
+
+    let home = TempDir::new().expect("tempdir");
+    let addr = start_server(&home).await;
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("client");
+
+    let repo_path = "D:/fake/repo/for_generation_test";
+    let repo_id = encode_repo_id(repo_path);
+
+    // Register the repo (generation starts at 0 → legacy path).
+    let put_body = serde_json::json!({
+        "repos": [repo_path],
+        "embedding": { "api_keys": ["test-key-gen"] }
+    });
+    client
+        .put(format!("http://{addr}/api/config"))
+        .json(&put_body)
+        .send()
+        .await
+        .expect("put config");
+
+    // Generation 0 → legacy path with no number segment; gen 1 nests under "1".
+    let gen0_dir = store::db_path(home.path(), repo_path, 0);
+    let gen1_dir = store::db_path(home.path(), repo_path, 1);
+    assert_ne!(gen0_dir, gen1_dir, "gen1 path must differ from gen0");
+
+    // Delete the index — server bumps the generation to 1 and persists it.
+    let del_res = client
+        .delete(format!("http://{addr}/api/repos/{repo_id}/index"))
+        .send()
+        .await
+        .expect("delete index");
+    assert_eq!(del_res.status().as_u16(), 200, "delete should succeed");
+
+    // GET /api/config must report repo_generations[repo] == 1.
+    let cfg: serde_json::Value = client
+        .get(format!("http://{addr}/api/config"))
+        .send()
+        .await
+        .expect("get config")
+        .json()
+        .await
+        .expect("parse config");
+    let normalized = store::normalize_repo_path(repo_path);
+    assert_eq!(
+        cfg["repo_generations"][&normalized].as_u64(),
+        Some(1),
+        "delete must bump generation to 1; got config: {cfg}"
+    );
+
+    // Now simulate the "Xóa repo" UI flow: PUT a config body that has NO
+    // repo_generations field (the client loaded it before the bump). The server
+    // must PRESERVE the bump, not reset it to 0.
+    let stale_put = serde_json::json!({
+        "repos": [repo_path],
+        "embedding": { "api_keys": ["test-key-gen"] }
+    });
+    client
+        .put(format!("http://{addr}/api/config"))
+        .json(&stale_put)
+        .send()
+        .await
+        .expect("stale put config");
+
+    let cfg2: serde_json::Value = client
+        .get(format!("http://{addr}/api/config"))
+        .send()
+        .await
+        .expect("get config 2")
+        .json()
+        .await
+        .expect("parse config 2");
+    assert_eq!(
+        cfg2["repo_generations"][&normalized].as_u64(),
+        Some(1),
+        "PUT /api/config must preserve the server-owned generation bump; got: {cfg2}"
+    );
+}
+
 // ─── Test 7b: DELETE aborts an in-flight schema migration before removal ──
 //
 // Regression test for the bug where a stale-version repo's background migration
@@ -618,7 +709,7 @@ async fn test_delete_repo_index_aborts_inflight_migration() {
     // Open via the low-level store API in a scope so the handle (and its RocksDB
     // LOCK) drops before the server re-opens the same path.
     {
-        let db = store::open_db(home.path(), repo_path)
+        let db = store::open_db(home.path(), repo_path, 0)
             .await
             .expect("seed open");
         store::ops::set_meta(&db, store::DB_SCHEMA_VERSION_KEY, "1")
@@ -800,8 +891,8 @@ async fn test_put_data_dir_persists_but_does_not_relocate() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // boot path: data_dir == boot_home.path() per start_server.
-    let boot_db = store::db_path(boot_home.path(), repo_path);
-    let new_db = store::db_path(&new_data_dir, repo_path);
+    let boot_db = store::db_path(boot_home.path(), repo_path, 0);
+    let new_db = store::db_path(&new_data_dir, repo_path, 0);
     assert!(
         boot_db.exists(),
         "DB must materialize under the BOOT data_dir, not the persisted one. \
