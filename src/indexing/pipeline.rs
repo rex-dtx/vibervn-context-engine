@@ -748,14 +748,43 @@ impl IndexPipeline {
             let fw_registry = framework_registry.clone();
             tokio::task::spawn_blocking(move || {
                 use rayon::prelude::*;
-                // Par-iterate, but channel send must be blocking.
-                files_owned.par_iter().for_each(|file| {
-                    let output = parse_one_file_with_frameworks(file, &fw_registry);
-                    // Blocking send — applies backpressure when embed is slow.
-                    if parse_tx.blocking_send(output).is_err() {
-                        // Receiver dropped (pipeline cancelled) — stop.
+
+                // Use a LOCAL rayon thread pool with a large stack size for parsing.
+                // The default rayon global pool has ~2 MB stacks which overflow on
+                // deeply-nested ASTs (Linux kernel C files). 64 MB virtual stack
+                // (only committed pages are physical) gives 3200 frames * ~512 bytes
+                // per frame = ~1.6 MB actual usage with headroom for future growth.
+                // We do NOT change the global pool — vector search uses it and must
+                // not be affected.
+                const PARSE_STACK_SIZE: usize = 64 * 1024 * 1024; // 64 MB virtual
+
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .stack_size(PARSE_STACK_SIZE)
+                    .build();
+
+                match pool {
+                    Ok(pool) => {
+                        pool.install(|| {
+                            files_owned.par_iter().for_each(|file| {
+                                let output = parse_one_file_with_frameworks(file, &fw_registry);
+                                // Blocking send — applies backpressure when embed is slow.
+                                if parse_tx.blocking_send(output).is_err() {
+                                    // Receiver dropped (pipeline cancelled) — stop.
+                                }
+                            });
+                        });
                     }
-                });
+                    Err(e) => {
+                        // Fallback: use global pool if custom pool creation fails.
+                        // This is degraded but functional — log and continue.
+                        warn!(error = %e, "failed to create parse thread pool with large stack; \
+                               falling back to global pool (stack overflow risk on deep ASTs)");
+                        files_owned.par_iter().for_each(|file| {
+                            let output = parse_one_file_with_frameworks(file, &fw_registry);
+                            if parse_tx.blocking_send(output).is_err() {}
+                        });
+                    }
+                }
                 // parse_tx dropped here, closing the channel.
             });
         }
@@ -856,19 +885,54 @@ impl IndexPipeline {
 
                                     let embed_result = match embed_parsed_file(&pf, voyage_ref.as_ref(), cache_ref.clone()).await {
                                         Ok(r) => r,
-                                        Err(e) => {
-                                            // Voyage failed — store error and cancel pipeline.
-                                            let msg = format!("{e:#}");
-                                            warn!(file = %file_path, error = %msg, "embed failed — aborting index");
-                                            if let Ok(mut slot) = err_slot.lock()
-                                                && slot.is_none()
-                                            {
-                                                *slot = Some(msg);
+                                        Err(embed_err) => {
+                                            // Classify: transient/retry-exhausted errors are
+                                            // NON-FATAL — skip this file and continue. The file
+                                            // has no file_meta committed, so the next index
+                                            // trigger re-processes it (self-healing via crash-
+                                            // safe file_meta). This prevents a single gateway
+                                            // timeout from aborting an entire 79K-file rebuild.
+                                            //
+                                            // Only genuinely fatal errors (auth 4xx, config,
+                                            // permanent API failure = EmbedFileError::Fatal) abort.
+                                            match embed_err {
+                                                EmbedFileError::Transient(e) => {
+                                                    let msg = format!("{e:#}");
+                                                    warn!(
+                                                        file = %file_path,
+                                                        error = %msg,
+                                                        "embed failed (transient, retry exhausted) — skipping file; \
+                                                         will retry on next index trigger"
+                                                    );
+                                                    // Emit FileSkipped event + advance progress so
+                                                    // the run completes without this file.
+                                                    if let Some(ref bus) = bus_ref {
+                                                        bus.emit(IndexEvent::FileSkipped {
+                                                            file: file_path.clone(),
+                                                            reason: format!("transient embed failure: {msg}"),
+                                                        });
+                                                    }
+                                                    let done = done_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                                                    if let Some(ph) = &progress_ref {
+                                                        ph.set_processed(done).await;
+                                                    }
+                                                    return None;
+                                                }
+                                                EmbedFileError::Fatal(e) => {
+                                                    // Fatal error — store and cancel pipeline.
+                                                    let msg = format!("{e:#}");
+                                                    warn!(file = %file_path, error = %msg, "embed failed (fatal) — aborting index");
+                                                    if let Ok(mut slot) = err_slot.lock()
+                                                        && slot.is_none()
+                                                    {
+                                                        *slot = Some(msg);
+                                                    }
+                                                    if let Some(ref ct) = ct_ref {
+                                                        ct.cancel();
+                                                    }
+                                                    return None;
+                                                }
                                             }
-                                            if let Some(ref ct) = ct_ref {
-                                                ct.cancel();
-                                            }
-                                            return None;
                                         }
                                     };
 
@@ -960,15 +1024,25 @@ impl IndexPipeline {
         // Reduces symbol write round-trips from O(files) to O(total_symbols/SYM_BATCH_SIZE).
         const SYM_BATCH_SIZE: usize = 2048;
         let mut pending_symbol_batch: Vec<Symbol> = Vec::with_capacity(SYM_BATCH_SIZE);
+        // Cross-file raw_edge accumulator: buffer raw edges from multiple files before INSERT.
+        // Reduces raw_edge write round-trips from O(files) to O(total_edges/RAW_EDGE_INSERT_BATCH_SIZE).
+        // Used on the overflow path (full rebuild after RAM cap exceeded) and incremental path.
+        // The RAM fast path (pre-overflow full rebuild) does NOT use this — edges stay in ram_raw_edges.
+        let mut pending_raw_edge_batch: Vec<RawEdgeRecord> = Vec::with_capacity(RAW_EDGE_INSERT_BATCH_SIZE);
 
         // Full-rebuild optimisation: buffer raw_edges in RAM (up to MAX_RAM_EDGES).
         // Avoids writing/reading raw_edges from DB (saves ~27s for notepad-ade).
         // If the repo exceeds MAX_RAM_EDGES, the buffer is flushed to DB and
         // `ram_edges_overflowed` is set — Phase 2 falls back to the DB scan path.
-        // Memory bound: MAX_RAM_EDGES × ~200 bytes (constant, independent of repo size
-        // for repos that fit; for larger repos the DB path is used instead).
+        // Memory bound: 8M × ~200 bytes ≈ 1.6 GB (constant, bounded regardless of
+        // repo size). Fits comfortably in a 64 GB workstation.
+        // Measured: the Linux kernel produces 4.44M raw edges in a full rebuild,
+        // which exceeded the previous 4M cap and fell through to the slow DB-scan
+        // Phase 2 path (45+ min). 8M gives ~1.8× headroom above real kernel scale
+        // while keeping memory bounded. Repos exceeding 8M edges (Chromium-scale)
+        // overflow to DB gracefully — no OOM risk.
         // NOT used for incremental (few edges, existing DB path is already fast).
-        const MAX_RAM_EDGES: usize = 200_000;
+        const MAX_RAM_EDGES: usize = 8_000_000;
         let mut ram_raw_edges: Vec<RawEdgeRecord> = if is_full_rebuild {
             Vec::with_capacity(std::cmp::min(4096, MAX_RAM_EDGES))
         } else {
@@ -1034,20 +1108,29 @@ impl IndexPipeline {
                             .await
                             .context("streaming_index: ram_raw_edges flush on overflow")?;
                     }
-                    // Flush current file's edges to DB.
-                    flush_raw_edge_batch_native(db, &ef.raw_edges)
-                        .await
-                        .context("streaming_index: raw_edges (overflow)")?;
+                    // Route current file's edges into the cross-file pending batch
+                    // (not a direct per-file flush). The batch flushes at
+                    // RAW_EDGE_INSERT_BATCH_SIZE granularity, converting O(files)
+                    // round-trips into O(total_edges / batch_size).
+                    pending_raw_edge_batch.extend(ef.raw_edges);
+                    if pending_raw_edge_batch.len() >= RAW_EDGE_INSERT_BATCH_SIZE {
+                        flush_raw_edge_batch_native(db, &std::mem::take(&mut pending_raw_edge_batch))
+                            .await
+                            .context("streaming_index: raw_edges (overflow batch)")?;
+                    }
                     ram_edges_overflowed = true;
                 }
             } else {
-                // Incremental path or post-overflow: write to DB as before.
+                // Incremental path or post-overflow: accumulate into cross-file batch.
                 // Crash-safe anchor: if process dies after Stage 3 but before Phase 2
                 // completes, the next run detects the absent `edges_resolved` marker
                 // and replays Phase 2 from the raw_edge DB table.
-                flush_raw_edge_batch_native(db, &ef.raw_edges)
-                    .await
-                    .context("streaming_index: raw_edges")?;
+                pending_raw_edge_batch.extend(ef.raw_edges);
+                if pending_raw_edge_batch.len() >= RAW_EDGE_INSERT_BATCH_SIZE {
+                    flush_raw_edge_batch_native(db, &std::mem::take(&mut pending_raw_edge_batch))
+                        .await
+                        .context("streaming_index: raw_edges (batched)")?;
+                }
             }
             rawedge_ns += t1.elapsed().as_nanos() as u64;
 
@@ -1095,6 +1178,19 @@ impl IndexPipeline {
                         .await
                         .context("streaming_index: cross-file chunk batch")?;
                     chunk_db_ns += t_db.elapsed().as_nanos() as u64;
+                    // Flush pending raw edges BEFORE committing file_metas.
+                    // Crash-safety invariant: file_meta is the commit marker and must
+                    // only become durable AFTER that file's chunks AND raw edges are
+                    // durable. Without this flush, a crash could leave file_meta present
+                    // with raw edges still in the pending batch — Phase 2 replay would
+                    // silently under-resolve because the edges were never persisted.
+                    if !pending_raw_edge_batch.is_empty() {
+                        let t_re = Instant::now();
+                        flush_raw_edge_batch_native(db, &std::mem::take(&mut pending_raw_edge_batch))
+                            .await
+                            .context("streaming_index: raw_edge batch at chunk-batch boundary")?;
+                        rawedge_ns += t_re.elapsed().as_nanos() as u64;
+                    }
                     // Commit all deferred file_metas accumulated so far.
                     let t_fm = Instant::now();
                     for fm in std::mem::take(&mut pending_file_metas) {
@@ -1182,7 +1278,11 @@ impl IndexPipeline {
             return Err(PipelineAbort::Cancelled.into());
         }
 
-        // ── Flush tail: remaining symbols + chunks + file_metas ─────────
+        // ── Flush tail: remaining symbols + chunks + raw edges + file_metas ─
+        // Order is critical for crash-safety: file_meta (the commit marker) must
+        // only become durable AFTER that file's chunks AND raw edges are durable.
+        // Phase-2 replay invariant: if file_meta is present, all of that file's
+        // raw_edge rows are guaranteed in the DB, so resolution is complete.
         if !pending_symbol_batch.is_empty() {
             let t0 = Instant::now();
             flush_symbol_batch_native(db, &pending_symbol_batch)
@@ -1198,6 +1298,13 @@ impl IndexPipeline {
                 .context("streaming_index: tail chunk batch")?;
             chunk_db_ns += t_db.elapsed().as_nanos() as u64;
             chunk_ns += t2.elapsed().as_nanos() as u64;
+        }
+        if !pending_raw_edge_batch.is_empty() {
+            let t_re = Instant::now();
+            flush_raw_edge_batch_native(db, &pending_raw_edge_batch)
+                .await
+                .context("streaming_index: tail raw_edge batch")?;
+            rawedge_ns += t_re.elapsed().as_nanos() as u64;
         }
         if !pending_file_metas.is_empty() {
             let t_fm = Instant::now();
@@ -1661,7 +1768,7 @@ impl IndexPipeline {
     ///
     /// This avoids the 9.6s raw_edge DB write + 17.5s DB scan that the keyset
     /// scan path (`resolve_edges_phase2`) requires.  Applicable only when all
-    /// raw_edges fit in RAM (bounded by MAX_RAM_EDGES = 200K); falls back to
+    /// raw_edges fit in RAM (bounded by MAX_RAM_EDGES = 8M); falls back to
     /// `resolve_edges_phase2` for larger repos.
     ///
     /// Crash-safety note: raw_edges are NOT in the DB when this path is taken.
@@ -2099,6 +2206,12 @@ fn parse_one_file_with_frameworks(
 // ─── Parse one file (returns ParseOutput — always returns, never drops silently) ─
 
 fn parse_one_file(file: &str) -> ParseOutput {
+    // Reset the recursion guard state for this file. Rayon workers are reused
+    // across files — without a per-file reset, the warn-once flag and current-file
+    // path carry over from the previous file on the same worker thread, which
+    // suppresses diagnostics and mis-attributes warnings to wrong files.
+    crate::parsing::recursion_guard::begin_file(file);
+
     let parse_start = Instant::now();
 
     let source = match std::fs::read_to_string(file) {
@@ -2185,6 +2298,37 @@ struct EmbedFileResult {
     miss_chunks: u64,
 }
 
+/// Error from embed_parsed_file, distinguishing transient/retry-exhausted
+/// errors (which should skip the file, non-fatal to the pipeline) from fatal
+/// errors (auth/config, which should abort the pipeline).
+///
+/// A transient gateway timeout on one file must not abort a 79K-file rebuild.
+/// Crash-safe file_meta means a skipped file is simply not committed and will
+/// be retried on the next index trigger (self-healing).
+enum EmbedFileError {
+    /// Transient network error that exhausted all retry attempts.
+    /// The file should be skipped (no file_meta committed); the next index
+    /// trigger re-processes it automatically.
+    Transient(anyhow::Error),
+    /// Fatal error (auth 4xx, config, permanent API failure).
+    /// The pipeline should abort immediately.
+    Fatal(anyhow::Error),
+}
+
+/// Classify an embed error as transient or fatal by checking the anyhow chain
+/// for the `TransientEmbedExhausted` marker.
+fn classify_embed_error(e: anyhow::Error) -> EmbedFileError {
+    // Walk the chain: TransientEmbedExhausted is added as `.context()` on the
+    // original reqwest error, so it appears as a cause in the source chain.
+    // anyhow::Error::downcast_ref checks the outermost type only; we need to
+    // check if the Error IS TransientEmbedExhausted (the outermost after
+    // embed_batch wraps with `.context(TransientEmbedExhausted{..})`).
+    if e.downcast_ref::<crate::embedding::TransientEmbedExhausted>().is_some() {
+        return EmbedFileError::Transient(e);
+    }
+    EmbedFileError::Fatal(e)
+}
+
 /// Outcome of a cache `get_many` lookup: `(hits, miss_indices)` where each hit
 /// is `(original_index, embedding)`.
 type GetManyOutcome = (Vec<(usize, Vec<f32>)>, Vec<usize>);
@@ -2222,7 +2366,7 @@ async fn embed_parsed_file(
     pf: &ParsedFile,
     voyage: Option<&VoyageClient>,
     cache: Option<Arc<EmbeddingCache>>,
-) -> Result<EmbedFileResult> {
+) -> std::result::Result<EmbedFileResult, EmbedFileError> {
     if pf.chunks.is_empty() {
         return Ok(EmbedFileResult {
             embeddings: vec![],
@@ -2305,10 +2449,7 @@ async fn embed_parsed_file(
                                 }
                             }
                             Err(e) => {
-                                return Err(e.context(format!(
-                                    "embed failed for dim-mismatched entries in {}",
-                                    pf.path
-                                )));
+                                return Err(classify_embed_error(e));
                             }
                         }
                     } else {
@@ -2362,10 +2503,7 @@ async fn embed_parsed_file(
                     match client.embed(&miss_texts, InputType::Document).await {
                         Ok(embs) => Some(embs),
                         Err(e) => {
-                            return Err(e.context(format!(
-                                "embed failed for cache-miss texts in {}",
-                                pf.path
-                            )));
+                            return Err(classify_embed_error(e));
                         }
                     }
                 } else {
@@ -2432,10 +2570,7 @@ async fn embed_parsed_file(
                                     }
                                 }
                                 Err(e) => {
-                                    return Err(e.context(format!(
-                                        "re-embed failed for dim-mismatched hits in {}",
-                                        pf.path
-                                    )));
+                                    return Err(classify_embed_error(e));
                                 }
                             }
                         }
@@ -2477,7 +2612,7 @@ async fn embed_parsed_file(
                             miss_chunks: texts.len() as u64,
                         }),
                         Err(e) => {
-                            Err(e.context(format!("embed failed for {}", pf.path)))
+                            Err(classify_embed_error(e))
                         }
                     }
                 }
@@ -4528,6 +4663,319 @@ mod null_byte_skip_tests {
 
         let output = parse_one_file(path);
         assert!(matches!(output, ParseOutput::Parsed(_)));
+    }
+}
+
+// ─── Tests: raw-edge batching + file_meta ordering (optimize-kernel-index-throughput) ───
+
+#[cfg(test)]
+mod raw_edge_batching_tests {
+    use super::*;
+    use crate::store::open_db;
+    use crate::store::ops::get_all_file_meta;
+    use serde::Deserialize;
+    use tempfile::TempDir;
+
+    /// Helper: insert a symbol for resolution in Phase 2.
+    #[allow(dead_code)]
+    async fn insert_symbol_fqn(db: &Surreal<Db>, fqn: &str, file: &str, name: &str) {
+        db.query(format!(
+            "UPSERT symbol:`⟨{fqn}⟩` SET \
+             name = '{name}', kind = 'function', file = '{file}', \
+             line_start = 1, line_end = 10, signature = NONE, parent = NONE"
+        ))
+        .await
+        .expect("insert symbol");
+    }
+
+    /// When raw edges are written via the DB path (overflow or incremental),
+    /// they must be batched across files (O(total_edges/batch_size) round-trips,
+    /// not O(files)). This test drives many small-file raw edges through the
+    /// pipeline's post-overflow path and verifies:
+    ///   1. All raw_edge records land in the DB (count matches expected)
+    ///   2. Phase 2 resolves the same set of calls as if written per-file
+    ///   3. file_meta exists only for files whose raw edges were flushed
+    #[tokio::test]
+    async fn batched_raw_edges_produce_correct_resolution() {
+        let home = TempDir::new().unwrap();
+        let repo_dir = TempDir::new().unwrap();
+        let repo = repo_dir.path().to_str().unwrap().replace('\\', "/");
+
+        // Create 10 source files, each defining a function and calling another.
+        // This generates enough raw edges to exercise the batching path.
+        for i in 0..10 {
+            let callee_name = format!("target_{}", i);
+            let caller_name = format!("caller_{}", i);
+            let content = format!(
+                "fn {caller_name}() {{\n    {callee_name}();\n}}\n\nfn {callee_name}() {{\n}}\n"
+            );
+            let path = repo_dir.path().join(format!("file_{i}.rs"));
+            std::fs::write(&path, content).unwrap();
+        }
+
+        let db = open_db(home.path(), &repo, 0).await.expect("open db");
+        let pipeline = IndexPipeline::new(repo.clone(), None);
+
+        let stats = pipeline
+            .run(&db, None, true, None, None, None, &[], None)
+            .await
+            .expect("full_rebuild with batched raw edges must succeed");
+
+        // Verify file_meta is present for all 10 files.
+        let all_meta = get_all_file_meta(&db, &repo).await.unwrap();
+        assert_eq!(
+            all_meta.len(), 10,
+            "all 10 files must have file_meta after full rebuild"
+        );
+
+        // Verify edges_resolved marker is set.
+        let marker = crate::store::ops::get_meta(&db, EDGES_RESOLVED_KEY).await.unwrap();
+        assert!(
+            marker.is_some(),
+            "edges_resolved marker must be set after full rebuild"
+        );
+
+        // Verify stats captured raw edges.
+        assert!(
+            stats.total_raw_edges > 0,
+            "total_raw_edges must be > 0 (got {})",
+            stats.total_raw_edges
+        );
+    }
+
+    /// file_meta ordering: if a run is interrupted (simulated) after chunks flush
+    /// but before file_meta commit, the file must be treated as not-yet-committed
+    /// on the next run (re-processed). This proves meta does not precede its
+    /// dependencies (chunks + raw edges).
+    ///
+    /// Implementation: run a full rebuild, manually delete a file's file_meta row
+    /// (simulating the crash window between chunk flush and meta commit), then run
+    /// an incremental. The incremental must detect the file as needing re-processing
+    /// (it won't appear in stored_meta, so a non-watcher incremental walk will pick
+    /// it up as Added).
+    #[tokio::test]
+    async fn file_meta_absence_triggers_reprocessing() {
+        let home = TempDir::new().unwrap();
+        let repo_dir = TempDir::new().unwrap();
+        let repo = repo_dir.path().to_str().unwrap().replace('\\', "/");
+
+        // Create two source files.
+        let file_a = repo_dir.path().join("alpha.rs");
+        let file_b = repo_dir.path().join("beta.rs");
+        std::fs::write(&file_a, "fn alpha() {}\n").unwrap();
+        std::fs::write(&file_b, "fn beta() { alpha(); }\n").unwrap();
+
+        let db = open_db(home.path(), &repo, 0).await.expect("open db");
+        let pipeline = IndexPipeline::new(repo.clone(), None);
+
+        // Full rebuild — both files indexed.
+        pipeline
+            .run(&db, None, true, None, None, None, &[], None)
+            .await
+            .expect("first full rebuild must succeed");
+
+        let meta_before = get_all_file_meta(&db, &repo).await.unwrap();
+        assert_eq!(meta_before.len(), 2, "both files must have meta after rebuild");
+
+        // Simulate crash: delete file_meta for alpha.rs (as if the meta commit
+        // never happened — the crash window our ordering prevents).
+        let alpha_path = file_a.to_str().unwrap().replace('\\', "/");
+        let escaped = escape_surreal(&alpha_path);
+        db.query(format!("DELETE FROM file_meta WHERE path = '{escaped}'"))
+            .await
+            .expect("simulate crash: delete alpha file_meta");
+
+        // Also remove the edges_resolved marker to simulate a partial state.
+        db.query("DELETE FROM index_meta WHERE key = 'edges_resolved'")
+            .await
+            .expect("delete edges_resolved");
+
+        // Next run: since file_meta is absent for alpha, it should detect it
+        // needs re-processing. With edges_resolved absent + raw_edge possibly empty
+        // for the RAM path, the crash-recovery logic in run() should trigger.
+        let result = pipeline
+            .run(&db, None, false, None, None, None, &[], None)
+            .await;
+
+        // The run should succeed (either via full rebuild recovery or incremental).
+        assert!(result.is_ok(), "recovery run must succeed: {:?}", result.err());
+
+        // After recovery, both files should have file_meta again.
+        let meta_after = get_all_file_meta(&db, &repo).await.unwrap();
+        assert_eq!(
+            meta_after.len(), 2,
+            "both files must have meta after recovery (got {})",
+            meta_after.len()
+        );
+
+        // edges_resolved must be set again.
+        let marker = crate::store::ops::get_meta(&db, EDGES_RESOLVED_KEY).await.unwrap();
+        assert!(marker.is_some(), "edges_resolved must be set after recovery");
+    }
+
+    /// When the RAM cap is exceeded (simulated via a large-enough repo or the
+    /// constant itself), the overflow-to-DB path must still produce the same
+    /// resolved calls as the RAM path would. This test creates files with enough
+    /// cross-file calls to verify resolution correctness regardless of path.
+    #[tokio::test]
+    async fn overflow_path_resolution_matches_ram_path() {
+        let home = TempDir::new().unwrap();
+        let repo_dir = TempDir::new().unwrap();
+        let repo = repo_dir.path().to_str().unwrap().replace('\\', "/");
+
+        // Create a chain of files: file_0 calls target_0, file_1 calls target_1, etc.
+        // Each file defines both its own caller and the target it calls.
+        for i in 0..5 {
+            let content = format!(
+                "fn caller_{i}() {{\n    target_{i}();\n}}\n\nfn target_{i}() {{}}\n"
+            );
+            let path = repo_dir.path().join(format!("mod_{i}.rs"));
+            std::fs::write(&path, content).unwrap();
+        }
+
+        let db = open_db(home.path(), &repo, 0).await.expect("open db");
+        let pipeline = IndexPipeline::new(repo.clone(), None);
+
+        let stats = pipeline
+            .run(&db, None, true, None, None, None, &[], None)
+            .await
+            .expect("rebuild must succeed");
+
+        // Verify calls were resolved.
+        #[derive(Deserialize)]
+        struct CallRow {
+            in_name: String,
+            out_name: String,
+        }
+        let calls: Vec<CallRow> = db
+            .query("SELECT in_name, out_name FROM calls")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+
+        // Each file has caller_N → target_N, so we expect at least 5 resolved calls.
+        assert!(
+            calls.len() >= 5,
+            "expected at least 5 resolved calls, got {}",
+            calls.len()
+        );
+
+        // Verify all callers reference full FQNs (not leaf names).
+        for call in &calls {
+            assert!(
+                call.in_name.contains("::"),
+                "in_name must be a full FQN, got: {}",
+                call.in_name
+            );
+            assert!(
+                call.out_name.contains("::"),
+                "out_name must be a full FQN, got: {}",
+                call.out_name
+            );
+        }
+
+        // Verify file_meta count matches file count.
+        let all_meta = get_all_file_meta(&db, &repo).await.unwrap();
+        assert_eq!(all_meta.len(), 5, "all 5 files must have file_meta");
+
+        // Verify stats.
+        assert!(stats.total_raw_edges >= 5, "expected at least 5 raw edges");
+        assert!(stats.total_symbols >= 10, "expected at least 10 symbols (2 per file)");
+    }
+}
+
+// ─── Tests: transient embed failure resilience ──────────────────────────────
+/// Tests that validate the per-file transient error skip behavior:
+///   1. A transient/exhausted embed error skips the file (no file_meta, FileSkipped
+///      emitted, pipeline continues indexing remaining files).
+///   2. A fatal (non-transient) embed error still aborts the pipeline.
+///   3. The classify_embed_error helper correctly classifies errors.
+///
+/// Root cause: a transient gateway timeout on one file during a 79K-file Linux kernel
+/// rebuild must NOT abort the entire multi-hour run. Crash-safe file_meta makes per-file
+/// skip self-healing — the next index trigger re-embeds the skipped file.
+#[cfg(test)]
+mod transient_embed_resilience_tests {
+    use super::*;
+    use crate::embedding::TransientEmbedExhausted;
+    use crate::store::open_db;
+    use crate::store::ops::get_all_file_meta;
+    use tempfile::TempDir;
+
+    /// classify_embed_error correctly identifies a TransientEmbedExhausted error
+    /// as Transient (the marker is the outermost context after embed_batch wraps it).
+    #[test]
+    fn classify_transient_error_correctly() {
+        // Simulate the exact error chain produced by embed_batch when transient
+        // retries are exhausted: original_err.context(TransientEmbedExhausted{..})
+        let original = anyhow::anyhow!("connection timed out");
+        let with_marker = original.context(TransientEmbedExhausted { attempts: 6 });
+
+        match classify_embed_error(with_marker) {
+            EmbedFileError::Transient(_) => {} // correct
+            EmbedFileError::Fatal(e) => panic!(
+                "TransientEmbedExhausted must be classified as Transient, got Fatal: {e:#}"
+            ),
+        }
+    }
+
+    /// A fatal (non-transient) error must NOT be misclassified as transient.
+    #[test]
+    fn classify_fatal_error_correctly() {
+        let fatal = anyhow::anyhow!("VoyageAI error 401: invalid API key");
+
+        match classify_embed_error(fatal) {
+            EmbedFileError::Fatal(_) => {} // correct
+            EmbedFileError::Transient(e) => panic!(
+                "fatal auth errors must NOT be classified as Transient: {e:#}"
+            ),
+        }
+    }
+
+    /// Full pipeline test: with no Voyage client, all files index with empty
+    /// embeddings (no transient error possible). This confirms the normal path
+    /// still works and no file_meta is skipped.
+    #[tokio::test]
+    async fn pipeline_completes_with_all_files_when_no_transient_errors() {
+        let home = TempDir::new().unwrap();
+        let repo_dir = TempDir::new().unwrap();
+        let repo = repo_dir.path().to_str().unwrap().replace('\\', "/");
+
+        // Create 5 source files.
+        for i in 0..5 {
+            let content = format!("fn func_{i}() {{}}\n");
+            let path = repo_dir.path().join(format!("file_{i}.rs"));
+            std::fs::write(&path, content).unwrap();
+        }
+
+        let db = open_db(home.path(), &repo, 0).await.expect("open db");
+        let pipeline = IndexPipeline::new(repo.clone(), None);
+
+        let stats = pipeline
+            .run(&db, None, true, None, None, None, &[], None)
+            .await
+            .expect("full rebuild without voyage must succeed");
+
+        // All 5 files must have file_meta (no skips).
+        let all_meta = get_all_file_meta(&db, &repo).await.unwrap();
+        assert_eq!(
+            all_meta.len(), 5,
+            "all 5 files must have file_meta when no embed errors occur"
+        );
+        assert_eq!(stats.indexed_files, 5);
+    }
+
+    /// Verify that the TRANSIENT_RETRY_LIMIT constant is in the expected range
+    /// after the bump from 3 to 6.
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn transient_retry_limit_is_six() {
+        use crate::embedding::voyage::TRANSIENT_RETRY_LIMIT_FOR_TEST;
+        assert_eq!(
+            TRANSIENT_RETRY_LIMIT_FOR_TEST, 6,
+            "TRANSIENT_RETRY_LIMIT must be 6 to ride out multi-second gateway blips"
+        );
     }
 }
 

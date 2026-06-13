@@ -1,6 +1,9 @@
 pub mod voyage;
 pub mod cache;
 
+// Re-export the transient-exhausted marker so the pipeline can classify errors.
+pub use voyage::TransientEmbedExhausted;
+
 /// Input type hint for the embedding API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputType {

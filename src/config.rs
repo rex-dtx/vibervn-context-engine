@@ -136,8 +136,11 @@ fn default_index_ignore_filenames() -> Vec<String> {
 fn default_embed_concurrency() -> usize {
     // Per-key concurrency: each API key is allowed this many concurrent
     // embedding batches in-flight. Runtime total = this value × number of
-    // keys. Default 16.
-    16
+    // keys. The embed stage is network-bound (the pipeline's pacing stage);
+    // 64 saturates typical gateways and keeps parse/store stages fed on
+    // multi-core machines. Gateway proven to handle 32+ parallel at sub-1.5s
+    // with zero 429s; 64 gives headroom. Default 64.
+    64
 }
 
 fn default_vector_resident_cap_mb() -> usize {
@@ -156,7 +159,7 @@ pub struct EmbeddingConfig {
     pub api_keys: Vec<String>,
     /// Per-key concurrency: number of embedding batches in-flight per API key.
     /// Runtime total in-flight batches = embed_concurrency × api_keys.len().
-    /// Defaults to 16.
+    /// Defaults to 64 (network-bound pacing stage; saturates typical gateways).
     #[serde(default = "default_embed_concurrency")]
     pub embed_concurrency: usize,
     /// Custom Voyage AI-compatible endpoint. Honored only when

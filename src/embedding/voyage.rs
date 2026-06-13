@@ -113,7 +113,8 @@ impl VoyageClient {
     /// Embed a single query string with bounded retry.
     ///
     /// Uses `input_type: "query"`. On 429 from all keys, waits 2 s and retries
-    /// once. A second 429 wave returns `Err`. Non-429 errors return `Err` immediately.
+    /// once. A second 429 wave returns `Err`. Transient/non-429 errors return
+    /// `Err` immediately (query path is user-facing with tight timeout).
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         let texts = vec![text.to_string()];
         let n_keys = self.inner.api_keys.len();
@@ -132,13 +133,16 @@ impl VoyageClient {
                 Err(EmbedError::RateLimited) => {
                     warn!(key_index = key_idx, "VoyageAI 429 on query embed — trying next key");
                 }
+                Err(EmbedError::Transient(e)) => return Err(e.context("VoyageAI transient error on query embed")),
                 Err(EmbedError::Other(e)) => return Err(e),
             }
         }
 
-        // All keys 429 — one backoff attempt (2 s), then return Err.
-        warn!("all VoyageAI keys rate-limited on query embed; backing off 2s");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // All keys 429 — one backoff attempt (2 s with jitter), then return Err.
+        let cursor_val = self.inner.key_cursor.load(Ordering::Relaxed);
+        let delay = backoff_with_jitter(2, cursor_val);
+        warn!(delay_ms = delay.as_millis() as u64, "all VoyageAI keys rate-limited on query embed; backing off");
+        tokio::time::sleep(delay).await;
 
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
@@ -150,6 +154,7 @@ impl VoyageClient {
                         .ok_or_else(|| anyhow::anyhow!("VoyageAI returned empty embeddings"));
                 }
                 Err(EmbedError::RateLimited) => continue,
+                Err(EmbedError::Transient(e)) => return Err(e.context("VoyageAI transient error on query embed")),
                 Err(EmbedError::Other(e)) => return Err(e),
             }
         }
@@ -170,48 +175,106 @@ impl VoyageClient {
 
     /// Embed a batch of up to `MAX_BATCH_SIZE` texts. Public so the pipeline can
     /// drive batching manually and report per-batch progress between awaits.
+    ///
+    /// Retry policy:
+    /// - 429 (rate-limited): infinite retry with exponential backoff + jitter
+    ///   (rate limits clear eventually).
+    /// - Transient (timeout/connect): bounded retry (TRANSIENT_RETRY_LIMIT attempts)
+    ///   then propagate error — the file is left un-embedded and will be retried on
+    ///   next index trigger via file_meta crash-safety.
+    /// - Other errors: abort immediately.
     pub async fn embed_batch(&self, texts: &[String], input_type: InputType) -> Result<Vec<Vec<f32>>> {
         let n_keys = self.inner.api_keys.len();
-        let start_cursor = self.inner.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
+        let mut transient_attempts: usize = 0;
 
-        // Try each key once before falling back to exponential backoff.
-        for offset in 0..n_keys {
-            let key_idx = (start_cursor + offset) % n_keys;
-            let key = &self.inner.api_keys[key_idx];
-
-            match self.try_embed_with_key(key, texts, input_type).await {
-                Ok(embeddings) => return Ok(embeddings),
-                Err(EmbedError::RateLimited) => {
-                    warn!(key_index = key_idx, "VoyageAI 429 — trying next key");
-                }
-                // Non-429 error: abort immediately, old data untouched.
-                Err(EmbedError::Other(e)) => return Err(e),
-            }
-        }
-
-        // All keys returned 429 — exponential backoff, retry indefinitely.
-        let mut delay_secs: u64 = 2;
         loop {
-            warn!(
-                delay_secs = delay_secs,
-                "all VoyageAI keys rate-limited; backing off"
-            );
-            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+            let start_cursor = self.inner.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
 
+            // Try each key once before falling back to backoff.
             for offset in 0..n_keys {
                 let key_idx = (start_cursor + offset) % n_keys;
                 let key = &self.inner.api_keys[key_idx];
+
                 match self.try_embed_with_key(key, texts, input_type).await {
-                    Ok(embeddings) => {
-                        info!("VoyageAI embed succeeded after backoff");
-                        return Ok(embeddings);
+                    Ok(embeddings) => return Ok(embeddings),
+                    Err(EmbedError::RateLimited) => {
+                        warn!(key_index = key_idx, "VoyageAI 429 — trying next key");
                     }
-                    Err(EmbedError::RateLimited) => continue,
+                    Err(EmbedError::Transient(e)) => {
+                        transient_attempts += 1;
+                        if transient_attempts >= TRANSIENT_RETRY_LIMIT {
+                            // Wrap with TransientEmbedExhausted so callers can
+                            // distinguish "transient/retry-exhausted" from a fatal
+                            // config/auth error via downcast_ref on the error chain.
+                            // This lets the pipeline skip one file without aborting
+                            // the whole run.
+                            return Err(e.context(TransientEmbedExhausted {
+                                attempts: transient_attempts,
+                            }));
+                        }
+                        let cursor_val = self.inner.key_cursor.load(Ordering::Relaxed);
+                        let delay = backoff_with_jitter(
+                            2u64.pow(transient_attempts as u32).min(16),
+                            cursor_val,
+                        );
+                        warn!(
+                            attempt = transient_attempts,
+                            max_attempts = TRANSIENT_RETRY_LIMIT,
+                            delay_ms = delay.as_millis() as u64,
+                            error = %e,
+                            "VoyageAI transient error — retrying after backoff"
+                        );
+                        tokio::time::sleep(delay).await;
+                        // Break inner key loop to retry from scratch with fresh cursor.
+                        break;
+                    }
+                    // Non-transient, non-429 error: abort immediately, old data untouched.
                     Err(EmbedError::Other(e)) => return Err(e),
                 }
             }
 
-            delay_secs = (delay_secs * 2).min(60);
+            // If we exhausted all keys without a transient break, they were all 429.
+            // Exponential backoff with jitter, retry indefinitely (rate limits clear).
+            if transient_attempts == 0 || transient_attempts >= TRANSIENT_RETRY_LIMIT {
+                // Only enter 429 backoff if the inner loop completed (no transient break).
+                let mut delay_secs: u64 = 2;
+                loop {
+                    let cursor_val = self.inner.key_cursor.load(Ordering::Relaxed);
+                    let delay = backoff_with_jitter(delay_secs, cursor_val);
+                    warn!(
+                        delay_ms = delay.as_millis() as u64,
+                        "all VoyageAI keys rate-limited; backing off with jitter"
+                    );
+                    tokio::time::sleep(delay).await;
+
+                    let retry_cursor = self.inner.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
+                    for offset in 0..n_keys {
+                        let key_idx = (retry_cursor + offset) % n_keys;
+                        let key = &self.inner.api_keys[key_idx];
+                        match self.try_embed_with_key(key, texts, input_type).await {
+                            Ok(embeddings) => {
+                                info!("VoyageAI embed succeeded after backoff");
+                                return Ok(embeddings);
+                            }
+                            Err(EmbedError::RateLimited) => continue,
+                            Err(EmbedError::Transient(e)) => {
+                                transient_attempts += 1;
+                                if transient_attempts >= TRANSIENT_RETRY_LIMIT {
+                                    return Err(e.context(TransientEmbedExhausted {
+                                        attempts: transient_attempts,
+                                    }));
+                                }
+                                // Break out of the 429 loop to retry via outer loop.
+                                break;
+                            }
+                            Err(EmbedError::Other(e)) => return Err(e),
+                        }
+                    }
+
+                    delay_secs = (delay_secs * 2).min(60);
+                }
+            }
+            // If we broke out of inner loop due to transient, the outer loop retries.
         }
     }
 
@@ -252,7 +315,24 @@ impl VoyageClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| EmbedError::Other(e.into()))?;
+            .map_err(|e| {
+                // Any error from .send() means no valid HTTP response was received —
+                // this is a transport-layer failure (timeout, connection refused,
+                // mid-flight connection reset/os error 10054, DNS, TLS handshake, etc.)
+                // and is inherently transient. Only is_builder() (a programming error
+                // constructing the request) is truly fatal here.
+                //
+                // Incident: a Linux kernel 79K-file rebuild got to 86% then ABORTED
+                // because a mid-flight connection reset (reqwest SendRequest / os error
+                // 10054) was not covered by the old `is_timeout() || is_connect()` check.
+                // The correct rule: no HTTP response arrived → Transient. HTTP error
+                // statuses (401, 400, 5xx) are handled separately below and remain fatal.
+                if is_send_error_transient(&e) {
+                    EmbedError::Transient(e.into())
+                } else {
+                    EmbedError::Other(e.into())
+                }
+            })?;
 
         let status = response.status();
 
@@ -272,7 +352,21 @@ impl VoyageClient {
         let resp: EmbedResponse = response
             .json()
             .await
-            .map_err(|e| EmbedError::Other(e.into()))?;
+            .map_err(|e| {
+                // At this point the HTTP status was verified as 2xx, so any error here
+                // is a body-read/decode failure: stream interrupted mid-transfer, partial
+                // JSON, connection reset during chunked encoding, decode timeout, etc.
+                // ALL of these are transient — the server accepted the request and began
+                // a valid response, but transport broke before we got the full body.
+                // Retrying will get the embeddings fresh.
+                //
+                // History: a body-read timeout and a mid-stream connection reset both
+                // aborted a 79K-file Linux kernel rebuild. The correct rule: if no
+                // complete, parseable response body was received from a 2xx response,
+                // it's transient. Fatal errors are exclusively HTTP error statuses
+                // (handled above) where the server explicitly rejected the request.
+                EmbedError::Transient(e.into())
+            })?;
 
         Ok(resp.data.into_iter().map(|d| d.embedding).collect())
     }
@@ -301,9 +395,98 @@ fn byte_aware_batches(texts: &[String]) -> Vec<&[String]> {
     batches
 }
 
+/// Classify whether a `reqwest::Error` from the `.send()` phase is transient.
+///
+/// The rule is simple: if no valid HTTP response was received, the failure is
+/// transport-level and inherently transient (timeout, connection refused,
+/// mid-flight reset/os error 10054, DNS resolution, TLS handshake error, proxy
+/// error, etc.). The ONLY non-transient send error is `is_builder()`, which
+/// indicates a programming mistake constructing the request (invalid URL, bad
+/// header value) — that will never self-heal on retry.
+///
+/// This function is factored out as a pure predicate so it can be unit-tested
+/// without requiring a live socket or specific OS error. The downstream retry
+/// loop (embed_batch) retries Transient up to TRANSIENT_RETRY_LIMIT times with
+/// exponential backoff; if exhausted, the file is skipped (not the whole run).
+#[inline]
+fn is_send_error_transient(e: &reqwest::Error) -> bool {
+    // is_builder() = config/programming error building the Request struct itself.
+    // Everything else from .send() is a transport failure: network unreachable,
+    // connection refused, connection reset (10054), timeout, DNS failure,
+    // TLS error, proxy errors, redirect loops, etc.
+    !e.is_builder()
+}
+
 enum EmbedError {
     RateLimited,
+    /// Transient network error (timeout, connection refused/reset, mid-flight
+    /// connection close, body-read failure) — retryable with bounded attempts.
+    Transient(anyhow::Error),
     Other(anyhow::Error),
+}
+
+/// Marker error type wrapped around a transient embed failure that exhausted
+/// all retry attempts. Carried inside the `anyhow::Error` chain so callers
+/// can distinguish "transient/exhausted-retry" from "fatal/config" errors via
+/// `err.downcast_ref::<TransientEmbedExhausted>()`.
+///
+/// A transient-exhausted failure for a single file is NON-FATAL to the pipeline:
+/// crash-safe `file_meta` means the file is simply not committed and will be
+/// retried on the next index trigger (self-healing). This distinction prevents
+/// a single gateway timeout from aborting an entire 79K-file Linux kernel rebuild.
+#[derive(Debug)]
+pub struct TransientEmbedExhausted {
+    pub attempts: usize,
+}
+
+impl std::fmt::Display for TransientEmbedExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "transient embed error exhausted after {} attempts",
+            self.attempts
+        )
+    }
+}
+
+impl std::error::Error for TransientEmbedExhausted {}
+
+/// Maximum number of retry attempts for transient network errors (timeout,
+/// connection failures). After this many attempts, the error propagates and
+/// the file is left un-embedded (resumable via file_meta on next trigger).
+///
+/// Set to 6 to ride out multi-second gateway blips on large-repo runs (e.g.
+/// Linux kernel 79K files through a shared gateway). With exponential backoff
+/// capped at 16s, 6 attempts ≈ 2+4+8+16+16 = 46s worst-case per file — long
+/// enough for most transient outages without stalling the pipeline indefinitely.
+const TRANSIENT_RETRY_LIMIT: usize = 6;
+
+/// Test-visible alias for TRANSIENT_RETRY_LIMIT so pipeline tests can assert
+/// the value without duplicating the constant.
+#[cfg(test)]
+pub const TRANSIENT_RETRY_LIMIT_FOR_TEST: usize = TRANSIENT_RETRY_LIMIT;
+
+/// Compute a backoff duration with jitter for retry loops. Uses a lightweight
+/// deterministic jitter derived from the atomic key cursor to de-correlate
+/// concurrent embed tasks without pulling in the `rand` crate.
+///
+/// `base_secs`: the base delay (doubles each iteration in the caller).
+/// `cursor_val`: a monotonically increasing value (e.g. key_cursor) used as
+/// entropy source for jitter.
+///
+/// Returns `base_secs + jitter` where jitter is 0..base_secs/4.
+fn backoff_with_jitter(base_secs: u64, cursor_val: usize) -> Duration {
+    // Use low bits of the cursor + current time nanos to derive cheap jitter.
+    // This is NOT cryptographic — it just needs to de-correlate concurrent tasks.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u64;
+    let entropy = (cursor_val as u64).wrapping_add(nanos);
+    // Jitter range: 0 .. base_secs/4 seconds (in millis for finer granularity).
+    let max_jitter_ms = (base_secs * 250).max(100); // at least 100ms jitter
+    let jitter_ms = entropy % max_jitter_ms;
+    Duration::from_secs(base_secs) + Duration::from_millis(jitter_ms)
 }
 
 #[cfg(test)]
@@ -385,5 +568,181 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].len(), 1);
         assert_eq!(batches[1].len(), 1);
+    }
+
+    #[test]
+    fn backoff_with_jitter_produces_bounded_duration() {
+        // backoff_with_jitter(base=2, cursor) should produce 2s + [0, 500ms)
+        for cursor in 0..100 {
+            let d = backoff_with_jitter(2, cursor);
+            assert!(d >= Duration::from_secs(2), "duration should be >= base");
+            // Max jitter for base=2: 2*250 = 500ms
+            assert!(
+                d < Duration::from_secs(2) + Duration::from_millis(500),
+                "duration should be < base + max_jitter; got {:?}",
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_with_jitter_has_minimum_jitter_range() {
+        // When base_secs=0, max_jitter_ms should be at least 100.
+        let d = backoff_with_jitter(0, 42);
+        // Duration should be [0ms, 100ms)
+        assert!(d < Duration::from_millis(100));
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn transient_retry_limit_is_bounded() {
+        // Unit test: verify the constant is a reasonable small number.
+        assert!(
+            TRANSIENT_RETRY_LIMIT >= 2 && TRANSIENT_RETRY_LIMIT <= 10,
+            "TRANSIENT_RETRY_LIMIT should be a small bounded number, got {}",
+            TRANSIENT_RETRY_LIMIT
+        );
+    }
+
+    /// Test that transient errors from reqwest are classified correctly.
+    /// With the broadened rule (!is_builder → Transient), ANY transport failure
+    /// from .send() must land in the Transient bucket — timeout, connection
+    /// refused, connection reset, DNS failure, etc.
+    #[tokio::test]
+    async fn transient_error_classification() {
+        // Build a client with 1ms timeout — any request will timeout.
+        let client = Client::builder()
+            .timeout(Duration::from_millis(1))
+            .build()
+            .unwrap();
+
+        // Create a VoyageClient pointing to localhost (no server running).
+        let vc = VoyageClient::new(
+            "test-model".to_string(),
+            vec!["fake-key".to_string()],
+            Some("http://127.0.0.1:1"), // port 1 — will timeout or connection-refuse
+        )
+        .unwrap();
+
+        // Call the internal method directly to check classification.
+        let texts = vec!["test".to_string()];
+        let result = vc
+            .try_embed_with_key_using(&client, "fake-key", &texts, InputType::Document)
+            .await;
+
+        match result {
+            Err(EmbedError::Transient(_)) => {
+                // Correct: any transport error from .send() is transient.
+            }
+            Err(EmbedError::Other(e)) => {
+                panic!(
+                    "transport error from .send() should be Transient, not Other: {}",
+                    e
+                );
+            }
+            Err(EmbedError::RateLimited) => {
+                panic!("should not get RateLimited from a transport error");
+            }
+            Ok(_) => {
+                panic!("should not succeed connecting to port 1");
+            }
+        }
+    }
+
+    /// Test the `is_send_error_transient` classification predicate directly.
+    ///
+    /// We construct reqwest errors via actual failed requests rather than trying
+    /// to construct them directly (reqwest::Error has no public constructor).
+    /// - Timeout error (1ms timeout to port 1) → transient
+    /// - Connection refused (port 1) → transient
+    /// Both must be `!is_builder()` → transient under our rule.
+    ///
+    /// This test validates that a connection-reset style error (which is
+    /// `is_request()` in reqwest — the same category as OS error 10054) would
+    /// also classify as transient, because `is_request()` implies `!is_builder()`.
+    #[tokio::test]
+    async fn is_send_error_transient_predicate() {
+        // Test 1: Timeout error — is_timeout() && !is_builder() → transient
+        let timeout_client = Client::builder()
+            .timeout(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        let timeout_err = timeout_client
+            .get("http://127.0.0.1:1/embeddings")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            is_send_error_transient(&timeout_err),
+            "timeout error must be transient: {:?}",
+            timeout_err
+        );
+        // Verify it's truly a timeout or at least not a builder error
+        assert!(!timeout_err.is_builder());
+
+        // Test 2: Connection-refused error (no timeout, port 1 rejects)
+        let connect_client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let connect_err = connect_client
+            .get("http://127.0.0.1:1/embeddings")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            is_send_error_transient(&connect_err),
+            "connection-refused error must be transient: {:?}",
+            connect_err
+        );
+        assert!(!connect_err.is_builder());
+
+        // Verify the logical invariant: for any reqwest error from .send(),
+        // is_builder() is the ONLY case that is NOT transient under our rule.
+        // Both errors above should NOT be builder errors:
+        assert!(
+            !timeout_err.is_builder() && !connect_err.is_builder(),
+            "send errors from actual network attempts are never builder errors"
+        );
+    }
+
+    /// Verify that the is_send_error_transient predicate would classify a
+    /// connection-reset (is_request) error as transient. We can't easily
+    /// synthesize OS error 10054 in a unit test, but we can verify the logical
+    /// contract: is_request() implies !is_builder(), which implies transient.
+    ///
+    /// reqwest categorizes errors into: is_builder, is_redirect, is_status,
+    /// is_timeout, is_connect, is_request, is_body, is_decode.
+    /// For .send() failures: is_timeout, is_connect, and is_request are the
+    /// three transport categories. None of these are is_builder, so all three
+    /// pass our `!is_builder()` check → classified transient.
+    #[tokio::test]
+    async fn connection_reset_is_transient_by_contract() {
+        // Get any .send() error to verify the contract
+        let client = Client::builder()
+            .timeout(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        let err = client
+            .get("http://127.0.0.1:1/embeddings")
+            .send()
+            .await
+            .unwrap_err();
+
+        // Key assertions about the classification contract:
+        // 1. The error is not a builder error (it got past request construction)
+        assert!(!err.is_builder());
+        // 2. Therefore it's transient under our rule
+        assert!(is_send_error_transient(&err));
+        // 3. The error IS one of the transport categories
+        assert!(
+            err.is_timeout() || err.is_connect() || err.is_request(),
+            "send error should be timeout/connect/request, got: {:?}",
+            err
+        );
+        // 4. Verify inverse: is_builder would be fatal
+        // (We can't construct a builder error without invalid input, but we
+        // verify the predicate logic: is_builder → !transient)
+        // This is guaranteed by the implementation: !e.is_builder()
     }
 }

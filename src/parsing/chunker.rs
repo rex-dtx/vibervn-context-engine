@@ -1,3 +1,4 @@
+use crate::parsing::recursion_guard;
 use crate::parsing::symbols::Symbol;
 use tree_sitter::Node;
 
@@ -102,6 +103,7 @@ struct Span {
 /// the text BETWEEN large children (punctuation, braces, blank lines) is still
 /// covered exactly once — guaranteeing full coverage with no gaps and no overlap.
 fn split_node(node: Node, source_len: usize, prefix: &[u32], out: &mut Vec<Span>) {
+    let _g = match recursion_guard::RecursionGuard::enter() { Some(g) => g, None => return };
     let node_start = node.start_byte();
     let node_end = node.end_byte().min(source_len);
     if node_start >= node_end {
