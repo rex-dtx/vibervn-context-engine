@@ -5587,6 +5587,113 @@ mod ram_symbol_buffer_invariance_tests {
     }
 }
 
+// Isolated micro-benchmark for the symbol-write primitive (target ①): is a plain
+// `INSERT INTO symbol $data` materially faster than the current
+// `INSERT ... ON DUPLICATE KEY UPDATE` (merge) for a DEDUPED set written into an
+// EMPTY table (the full-rebuild scenario)? Answers go/no-go BEFORE touching the
+// durable write path. #[ignore]d — run explicitly:
+//   cargo test --release --lib symbol_insert_merge_vs_plain_microbench -- --ignored --nocapture
+#[cfg(test)]
+mod symbol_write_microbench {
+    use super::*;
+    use crate::store::open_db;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    fn synth_symbols(n: usize) -> Vec<Symbol> {
+        use crate::parsing::symbols::{QualifiedSymbol, SymbolKind};
+        // Distinct FQNs (deduped set): file_{i/50}.c::sym_{i}. ~50 symbols/file,
+        // realistic name/signature sizes so byte volume mirrors real symbols.
+        (0..n)
+            .map(|i| Symbol {
+                qualified: QualifiedSymbol {
+                    file: format!("/repo/sub{}/file_{}.c", i % 4096, i / 50),
+                    scope_path: vec![],
+                    name: format!("sym_{i}"),
+                },
+                kind: SymbolKind::Function,
+                line_start: (i % 2000) as u32,
+                line_end: (i % 2000 + 12) as u32,
+                signature: Some(format!("int sym_{i}(struct foo *ctx, unsigned long flags)")),
+                parent_fqn: None,
+            })
+            .collect()
+    }
+
+    async fn drop_symbol_indexes(db: &Surreal<Db>) {
+        db.query(
+            "REMOVE INDEX IF EXISTS idx_symbol_file ON symbol; \
+             REMOVE INDEX IF EXISTS idx_symbol_name ON symbol;",
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Plain INSERT (no merge clause) — the candidate write. Valid ONLY when the
+    /// batch set is deduped and the table is empty (no key collisions possible).
+    async fn flush_plain(db: &Surreal<Db>, symbols: &[Symbol]) {
+        use crate::store::ops::kind_to_str;
+        use std::collections::BTreeMap;
+        for chunk in symbols.chunks(4096) {
+            let records: Vec<SqlValue> = chunk
+                .iter()
+                .map(|sym| {
+                    let mut map: BTreeMap<String, SqlValue> = BTreeMap::new();
+                    map.insert("id".into(), SqlValue::from(sym.qualified.fqn()));
+                    map.insert("name".into(), SqlValue::from(sym.qualified.name.as_str()));
+                    map.insert("kind".into(), SqlValue::from(kind_to_str(&sym.kind)));
+                    map.insert("file".into(), SqlValue::from(sym.qualified.file.as_str()));
+                    map.insert("line_start".into(), SqlValue::from(sym.line_start as i64));
+                    map.insert("line_end".into(), SqlValue::from(sym.line_end as i64));
+                    match &sym.signature {
+                        Some(s) => map.insert("signature".into(), SqlValue::from(s.as_str())),
+                        None => map.insert("signature".into(), SqlValue::None),
+                    };
+                    map.insert("parent".into(), SqlValue::None);
+                    SqlValue::Object(SqlObject::from(map))
+                })
+                .collect();
+            db.query("INSERT INTO symbol $data RETURN NONE")
+                .bind(("data", SqlArray::from(records)))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn symbol_insert_merge_vs_plain_microbench() {
+        let n: usize = std::env::var("MICROBENCH_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_600_000);
+        let symbols = synth_symbols(n);
+        println!("microbench: {} deduped synthetic symbols", symbols.len());
+
+        // Path A: current merge INSERT (ON DUPLICATE KEY UPDATE).
+        let home_m = TempDir::new().unwrap();
+        let db_m = open_db(home_m.path(), "/mb/merge", 0).await.unwrap();
+        drop_symbol_indexes(&db_m).await;
+        let t = Instant::now();
+        flush_symbol_batch_native(&db_m, &symbols).await.unwrap();
+        let merge_ms = t.elapsed().as_millis();
+
+        // Path B: plain INSERT (no merge).
+        let home_p = TempDir::new().unwrap();
+        let db_p = open_db(home_p.path(), "/mb/plain", 0).await.unwrap();
+        drop_symbol_indexes(&db_p).await;
+        let t = Instant::now();
+        flush_plain(&db_p, &symbols).await;
+        let plain_ms = t.elapsed().as_millis();
+
+        let delta = merge_ms as i128 - plain_ms as i128;
+        let pct = if merge_ms > 0 { 100.0 * delta as f64 / merge_ms as f64 } else { 0.0 };
+        println!("MICROBENCH RESULT n={n} merge_ms={merge_ms} plain_ms={plain_ms} delta_ms={delta} plain_faster_by={pct:.1}%");
+    }
+}
+
 #[cfg(test)]
 mod null_byte_skip_tests {
     use super::*;
