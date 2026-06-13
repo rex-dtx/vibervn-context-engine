@@ -71,6 +71,11 @@ pub struct QueryResult {
     pub pre_rerank_results: Vec<CodeResult>,
     pub timing: QueryTiming,
     pub rerank: Option<RerankInfo>,
+    /// True when the target repo's vector shard was not resident after the bounded
+    /// warm-wait expired — an empty `results` here means "still warming, retry",
+    /// NOT "the index contains nothing". False for a genuine empty or a hit.
+    #[serde(default)]
+    pub warming: bool,
 }
 
 // ─── DB row types ─────────────────────────────────────────────────────────
@@ -151,7 +156,8 @@ pub async fn run_query_with_filters(
     // ── Step 2: Vector search ─────────────────────────────────────────────
     let search_start = Instant::now();
     // Search for 2× top_k so graph expansion has candidates to work with.
-    let raw_results = index_engine.vector_search(&embedding, top_k * 2, repo_filter, warm_wait).await;
+    let crate::indexing::VectorSearchOutcome { results: raw_results, warming } =
+        index_engine.vector_search(&embedding, top_k * 2, repo_filter, warm_wait).await;
     let search_ms = search_start.elapsed().as_millis() as u64;
 
     if raw_results.is_empty() {
@@ -167,6 +173,7 @@ pub async fn run_query_with_filters(
                 total_ms: total_start.elapsed().as_millis() as u64,
             },
             rerank: None,
+            warming,
         });
     }
 
@@ -404,6 +411,7 @@ pub async fn run_query_with_filters(
             total_ms,
         },
         rerank: Some(rerank_info),
+        warming,
     })
 }
 
@@ -427,7 +435,8 @@ pub(crate) async fn run_sub_query(
         bail!("embed_query returned an empty vector");
     }
 
-    let raw_results = index_engine.vector_search(&embedding, top_k * 2, Some(repo_filter), warm_wait).await;
+    let crate::indexing::VectorSearchOutcome { results: raw_results, .. } =
+        index_engine.vector_search(&embedding, top_k * 2, Some(repo_filter), warm_wait).await;
     if raw_results.is_empty() {
         return Ok(vec![]);
     }

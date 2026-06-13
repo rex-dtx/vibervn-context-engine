@@ -251,6 +251,18 @@ pub(crate) async fn seed_statuses_from_db(
     }
 }
 
+/// Outcome of a `vector_search` call.
+///
+/// `warming` distinguishes a transient cold/warming shard from a genuine empty:
+/// it is true only when a single-repo query found the target shard NOT resident
+/// after the bounded warm-wait expired. An empty `results` with `warming=true`
+/// means "retry shortly", NOT "the index contains nothing". A resident shard that
+/// matches nothing yields `warming=false` (a real empty).
+pub struct VectorSearchOutcome {
+    pub results: Vec<SearchResult>,
+    pub warming: bool,
+}
+
 impl IndexEngine {
     /// Create the engine and spawn the watcher background task.
     ///
@@ -531,9 +543,10 @@ impl IndexEngine {
         top_k: usize,
         repo_filter: Option<&str>,
         warm_wait: std::time::Duration,
-    ) -> Vec<SearchResult> {
+    ) -> VectorSearchOutcome {
         // Single-repo scope: block-warm a cold repo before searching so the first
         // query of the session returns complete results instead of empty.
+        let mut warming = false;
         if let Some(repo) = repo_filter {
             let resident = self.vector_index.read().await.is_resident(repo);
             if !resident {
@@ -543,6 +556,13 @@ impl IndexEngine {
                 // query re-attempts the warm.
                 let _ = tokio::time::timeout(warm_wait, self.warm_repo_blocking(repo.to_string()))
                     .await;
+                // Re-check residency AFTER the bounded warm. If the shard is STILL
+                // not resident, the warm-wait expired before load_from_db finished
+                // (e.g. a multi-GB shard, or it was evicted under memory pressure).
+                // The search below will return empty — but that empty means "still
+                // warming", NOT "the index contains nothing". Surface that distinction
+                // so callers retry instead of concluding the codebase is empty.
+                warming = !self.vector_index.read().await.is_resident(repo);
             }
         }
 
@@ -571,7 +591,7 @@ impl IndexEngine {
             });
         }
 
-        results
+        VectorSearchOutcome { results, warming }
     }
 
     /// Per-repo async warm lock, lazily created. Mirrors `get_repo_lock`.
@@ -1046,5 +1066,61 @@ mod load_repos_tests {
             3,
             "single-flight warm must install the shard once (3 seeded vectors, not doubled)"
         );
+    }
+
+    /// A shard that is NOT resident after the warm attempt yields warming=true with
+    /// empty results — the "retry, not empty" signal. Forced deterministically with a
+    /// 0-chunk repo: warm_repo_shard loads nothing (count==0) and never installs a
+    /// shard, so it stays non-resident regardless of timing — exactly the condition
+    /// `warming = !is_resident(repo)` detects after the bounded warm.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vector_search_signals_warming_when_shard_not_resident() {
+        let home = TempDir::new().expect("tempdir");
+        let repo = "/proj/cold".to_string();
+        let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
+        // 0 chunks → warm installs no shard → non-resident after the warm attempt.
+        seed_repo(&repo_dbs, home.path(), &repo, 0).await;
+        let settings = crate::config::Settings { repos: vec![repo.clone()], ..Default::default() };
+        let settings_handle = Arc::new(RwLock::new(settings.clone()));
+        let engine = IndexEngine::start(
+            home.path().to_path_buf(), home.path().join("embeddings"),
+            &settings, repo_dbs.clone(), settings_handle,
+        ).await;
+
+        let q = vec![1.0f32, 0.0, 0.0, 0.0];
+        let outcome = engine
+            .vector_search(&q, 10, Some(&repo), std::time::Duration::from_secs(5))
+            .await;
+        assert!(outcome.results.is_empty(), "non-resident shard search returns empty");
+        assert!(outcome.warming, "non-resident shard after warm attempt must signal warming=true");
+    }
+
+    /// A resident shard that genuinely matches nothing yields warming=false — a real
+    /// empty, NOT a warming state. (Here the shard is warmed first via a generous wait.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vector_search_resident_empty_is_not_warming() {
+        let home = TempDir::new().expect("tempdir");
+        let repo = "/proj/resident".to_string();
+        let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::new()));
+        seed_repo(&repo_dbs, home.path(), &repo, 3).await;
+        let settings = crate::config::Settings { repos: vec![repo.clone()], ..Default::default() };
+        let settings_handle = Arc::new(RwLock::new(settings.clone()));
+        let engine = IndexEngine::start(
+            home.path().to_path_buf(), home.path().join("embeddings"),
+            &settings, repo_dbs.clone(), settings_handle,
+        ).await;
+
+        // Warm the shard explicitly so it is resident before the search.
+        engine.warm_repo_blocking(repo.clone()).await;
+        assert!(engine.vector_index.read().await.is_resident(&repo), "precondition: resident");
+
+        // Query with a generous wait; the shard is resident so warming must be false.
+        // top_k=0 forces an empty result set on a resident shard (genuine empty).
+        let q = vec![1.0f32, 0.0, 0.0, 0.0];
+        let outcome = engine
+            .vector_search(&q, 0, Some(&repo), std::time::Duration::from_secs(10))
+            .await;
+        assert!(outcome.results.is_empty(), "top_k=0 yields empty on a resident shard");
+        assert!(!outcome.warming, "resident shard must NOT signal warming, even when empty");
     }
 }

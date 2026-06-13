@@ -633,6 +633,34 @@ impl ServerHandler for RepoMcpHandler {
 ///
 /// This is the single shared funnel used by both the MCP tool and the REST
 /// endpoint (`POST /api/mcp-tool`), so their outputs are byte-identical.
+/// Choose the message for a query that produced no result blocks, distinguishing a
+/// transient *warming* shard (retry) from a genuine empty ("no results"). Pure
+/// function of the three signals so it is unit-testable without a live query.
+///
+/// Precedence: `warming` wins — an empty result while the shard is still loading
+/// must NOT be reported as "no results" (the index is complete on disk). Only when
+/// the shard is resident (`warming=false`) do we report a genuine empty, with the
+/// rerank-rejected wording when the reranker actively rejected all candidates.
+fn select_empty_or_warming_message(
+    warming: bool,
+    rerank_rejected: bool,
+    information_request: &str,
+) -> String {
+    if warming {
+        return "The index for this workspace is still warming (loading into memory). \
+                It is complete on disk — retry the same request in a few seconds."
+            .to_string();
+    }
+    if rerank_rejected {
+        return "No relevant code found. The indexed codebase does not appear to \
+                contain information related to this query. Please verify the query \
+                is relevant to this project, or try alternative tools such as Grep \
+                for exact-match searches."
+            .to_string();
+    }
+    format!("No results found for: {information_request}")
+}
+
 pub async fn run_codebase_retrieval(
     home_dir: &Path,
     data_dir: &Path,
@@ -1410,6 +1438,33 @@ mod tests {
         // Line "2: bbb" appeared in both blocks but should only appear once.
         assert_eq!(merged[0].content.matches("2: bbb").count(), 1);
     }
+
+    // ─── select_empty_or_warming_message (warming-vs-empty signal) ───────────
+
+    #[test]
+    fn warming_message_takes_precedence_and_says_retry() {
+        // warming=true → retry message, regardless of rerank_rejected.
+        for rr in [false, true] {
+            let msg = select_empty_or_warming_message(true, rr, "find the parser");
+            assert!(msg.contains("warming"), "warming msg must mention warming: {msg}");
+            assert!(msg.to_lowercase().contains("retry"), "must tell caller to retry: {msg}");
+            // MUST NOT use the genuine-empty wording.
+            assert!(!msg.contains("No results found"), "warming must not say 'No results found'");
+            assert!(!msg.contains("No relevant code found"), "warming must not say 'No relevant code found'");
+        }
+    }
+
+    #[test]
+    fn genuine_empty_resident_shard_keeps_existing_wording() {
+        // warming=false, not rejected → the unchanged "No results found for: <q>".
+        let msg = select_empty_or_warming_message(false, false, "find the parser");
+        assert_eq!(msg, "No results found for: find the parser");
+
+        // warming=false, rerank actively rejected → the unchanged rerank-rejected wording.
+        let msg = select_empty_or_warming_message(false, true, "find the parser");
+        assert!(msg.starts_with("No relevant code found."), "rerank-rejected wording preserved: {msg}");
+        assert!(!msg.contains("warming"), "genuine empty must not mention warming");
+    }
 }
 
 /// Build an augmented query string that prepends structured filter params as inline
@@ -1535,18 +1590,20 @@ async fn do_query(
     {
         Err(e) => format!("Error: query failed: {e}"),
         Ok(result) => {
-            if result.results.is_empty() {
+            // Warming takes precedence over the empty-handling: an empty result with
+            // `warming` set means the repo's vector shard was not resident after the
+            // bounded warm-wait expired — the index IS complete, it just hasn't loaded
+            // into memory yet. Returning "No results found" here would falsely tell the
+            // caller the codebase has nothing relevant; instead signal a retry. The
+            // decision is a pure function of (warming, empty, rerank_rejected) so it is
+            // unit-tested directly (see select_empty_or_warming_message).
+            if result.warming || result.results.is_empty() {
                 let rerank_rejected = result.rerank.as_ref().is_some_and(|r| {
                     !r.fallback_used && r.skip_reason.is_none() && !r.raw_response.is_empty()
                 });
-                if rerank_rejected {
-                    return "No relevant code found. The indexed codebase does not appear to \
-                            contain information related to this query. Please verify the query \
-                            is relevant to this project, or try alternative tools such as Grep \
-                            for exact-match searches."
-                        .to_string();
-                }
-                return format!("No results found for: {information_request}");
+                return select_empty_or_warming_message(
+                    result.warming, rerank_rejected, information_request,
+                );
             }
             let blocks: Vec<OutputBlock> = result
                 .results
