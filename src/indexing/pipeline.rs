@@ -5856,57 +5856,77 @@ mod recall_gate {
         let probe_idxs: Vec<usize> = (0..n).step_by(stride).take(n_probes).collect();
 
         let topk = 30usize;
-        let mut recall10_sum = 0.0f64;
-        let mut recall30_sum = 0.0f64;
-        let mut drift_sum = 0.0f64;
-        let mut drift_max = 0.0f32;
 
-        for &qi in &probe_idxs {
-            let q_f32 = &corpus[qi];
-            let q_i8 = &corpus_i8[qi];
+        // Per-probe metrics, computed in parallel (last single-threaded run was 9.4min).
+        use rayon::prelude::*;
+        struct ProbeMetric { r10: f64, r30: f64, drift_sum: f64, drift_max: f32 }
+        let metrics: Vec<ProbeMetric> = probe_idxs
+            .par_iter()
+            .map(|&qi| {
+                let q_f32 = &corpus[qi];
+                let q_i8 = &corpus_i8[qi];
 
-            // f32 ground-truth top-k (leave-one-out: skip self).
-            let mut f32_scored: Vec<(usize, f32)> = (0..n)
-                .filter(|&j| j != qi)
-                .map(|j| (j, dot_product(q_f32, &corpus[j])))
-                .collect();
-            f32_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            let gt: Vec<usize> = f32_scored.iter().take(topk).map(|(j, _)| *j).collect();
+                // f32 ground-truth top-k (leave-one-out: skip self).
+                let mut f32_scored: Vec<(usize, f32)> = (0..n)
+                    .filter(|&j| j != qi)
+                    .map(|j| (j, dot_product(q_f32, &corpus[j])))
+                    .collect();
+                f32_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let gt: Vec<usize> = f32_scored.iter().take(topk).map(|(j, _)| *j).collect();
 
-            // i8 top-k.
-            let mut i8_scored: Vec<(usize, f32)> = (0..n)
-                .filter(|&j| j != qi)
-                .map(|j| (j, dot_product_i8_dequant(q_i8, &corpus_i8[j])))
-                .collect();
-            i8_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            let got: Vec<usize> = i8_scored.iter().take(topk).map(|(j, _)| *j).collect();
+                // i8 top-k.
+                let mut i8_scored: Vec<(usize, f32)> = (0..n)
+                    .filter(|&j| j != qi)
+                    .map(|j| (j, dot_product_i8_dequant(q_i8, &corpus_i8[j])))
+                    .collect();
+                i8_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let got: Vec<usize> = i8_scored.iter().take(topk).map(|(j, _)| *j).collect();
 
-            let gt10: std::collections::HashSet<usize> = gt.iter().take(10).copied().collect();
-            let gt30: std::collections::HashSet<usize> = gt.iter().copied().collect();
-            let got10: std::collections::HashSet<usize> = got.iter().take(10).copied().collect();
-            let got30: std::collections::HashSet<usize> = got.iter().copied().collect();
-            recall10_sum += gt10.intersection(&got10).count() as f64 / 10.0;
-            recall30_sum += gt30.intersection(&got30).count() as f64 / topk as f64;
+                let gt10: std::collections::HashSet<usize> = gt.iter().take(10).copied().collect();
+                let gt30: std::collections::HashSet<usize> = gt.iter().copied().collect();
+                let got10: std::collections::HashSet<usize> = got.iter().take(10).copied().collect();
+                let got30: std::collections::HashSet<usize> = got.iter().copied().collect();
+                let r10 = gt10.intersection(&got10).count() as f64 / 10.0;
+                let r30 = gt30.intersection(&got30).count() as f64 / topk as f64;
 
-            // Score drift on the f32 top-k items (i8 score vs f32 score).
-            for &j in gt.iter().take(10) {
-                let d = (dot_product(q_f32, &corpus[j]) - dot_product_i8_dequant(q_i8, &corpus_i8[j])).abs();
-                drift_sum += d as f64;
-                drift_max = drift_max.max(d);
-            }
-            let _ = &labels; // labels retained for debugging if needed
-        }
+                let mut drift_sum = 0.0f64;
+                let mut drift_max = 0.0f32;
+                for &j in gt.iter().take(10) {
+                    let d = (dot_product(q_f32, &corpus[j]) - dot_product_i8_dequant(q_i8, &corpus_i8[j])).abs();
+                    drift_sum += d as f64;
+                    drift_max = drift_max.max(d);
+                }
+                ProbeMetric { r10, r30, drift_sum, drift_max }
+            })
+            .collect();
+        let _ = &labels;
 
-        let p = probe_idxs.len() as f64;
-        let recall10 = recall10_sum / p;
-        let recall30 = recall30_sum / p;
-        let drift_mean = drift_sum / (p * 10.0);
+        let p = metrics.len() as f64;
+        let recall10 = metrics.iter().map(|m| m.r10).sum::<f64>() / p;
+        let recall30 = metrics.iter().map(|m| m.r30).sum::<f64>() / p;
+        let drift_mean = metrics.iter().map(|m| m.drift_sum).sum::<f64>() / (p * 10.0);
+        let drift_max = metrics.iter().map(|m| m.drift_max).fold(0.0f32, f32::max);
+
+        // recall@10 DISTRIBUTION — is 0.93 uniform, or a few probes tanking the mean?
+        let mut r10s: Vec<f64> = metrics.iter().map(|m| m.r10).collect();
+        r10s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |q: f64| r10s[((r10s.len() as f64 - 1.0) * q).round() as usize];
+        // Histogram of per-probe recall@10 in 0.1 buckets [0.0..1.0].
+        let mut hist = [0usize; 11];
+        for &r in &r10s { hist[(r * 10.0).round() as usize] += 1; }
+        let below_080 = r10s.iter().filter(|&&r| r < 0.80).count();
+        let perfect = r10s.iter().filter(|&&r| r >= 0.999).count();
+        println!(
+            "RECALL@10 DISTRIBUTION min={:.2} p10={:.2} p25={:.2} median={:.2} p75={:.2} max={:.2} \
+             | #probes<0.80={below_080} #probes==1.0={perfect} | hist[0.0..1.0 by 0.1]={hist:?}",
+            r10s[0], pct(0.10), pct(0.25), pct(0.50), pct(0.75), r10s[r10s.len()-1],
+        );
         println!(
             "RECALL GATE RESULT repo={repo} probes={} corpus={n} \
              recall@10={recall10:.4} recall@30={recall30:.4} \
              score_drift_mean={drift_mean:.5} score_drift_max={drift_max:.5} \
              gate_recall10>=0.98={}",
-            probe_idxs.len(),
+            metrics.len(),
             if recall10 >= 0.98 { "PASS" } else { "FAIL->mmap-fallback" }
         );
     }
