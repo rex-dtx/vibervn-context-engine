@@ -7,13 +7,14 @@ use tracing::info;
 use crate::path_in_repo;
 
 pub mod sharded;
+pub mod shard_file;
 pub use sharded::{ShardedSearch, ShardedVectorIndex};
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
 /// Identifies a chunk by its location in the source tree.
 /// Used to map VectorIndex results back to SurrealDB rows.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkId {
     pub file: String,
     pub line_start: u32,
@@ -41,19 +42,74 @@ pub struct SearchResult {
 ///
 /// At 500 K chunks × 1024 dims, rayon + SIMD give sub-100 ms per query.
 pub struct VectorIndex {
-    /// Contiguous row-major flat storage. Length = len * dim.
-    embeddings: Vec<f32>,
-    /// Parallel array: chunk_ids[i] corresponds to row i.
+    /// Row-major embedding storage: either an owned heap `Vec<f32>` (the mutable
+    /// build path) or a memory-mapped read-only f32 region (the mmap path, where
+    /// the OS page cache owns physical residency — not our heap). Both expose a
+    /// contiguous `&[f32]` of length `len * dim` via `embeddings_slice()`.
+    store: EmbeddingStore,
+    /// Parallel array: chunk_ids[i] corresponds to row i. Always heap-resident
+    /// (small: ~tens of bytes/row), even for an mmap shard.
     chunk_ids: Vec<ChunkId>,
-    /// Dimensionality of every vector. `None` until the first insert.
+    /// Dimensionality of every vector. 0 until the first insert / mmap load.
     dim: usize,
+}
+
+/// Backing storage for a shard's flat row-major f32 embeddings.
+enum EmbeddingStore {
+    /// Owned heap storage — the mutable build path (insert/remove/merge).
+    Ram(Vec<f32>),
+    /// Memory-mapped read-only f32 region. `map` holds the file mapping alive;
+    /// `f32_off`/`f32_len` delimit the f32 payload within it (after the header).
+    /// Physical residency is OS-page-cache-owned, NOT counted against the heap cap.
+    Mmap {
+        map: memmap2::Mmap,
+        f32_off: usize,
+        f32_len: usize,
+    },
+}
+
+impl EmbeddingStore {
+    /// The flat row-major f32 slice, regardless of backing.
+    #[inline]
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            EmbeddingStore::Ram(v) => v.as_slice(),
+            EmbeddingStore::Mmap { map, f32_off, f32_len } => {
+                let bytes = &map[*f32_off..*f32_off + *f32_len * std::mem::size_of::<f32>()];
+                // The writer 4-byte-aligns the f32 region (validated on open), so
+                // this cast is sound. bytemuck checks alignment + size.
+                bytemuck::cast_slice::<u8, f32>(bytes)
+            }
+        }
+    }
+
+    /// Mutable heap Vec for the build/mutation path.
+    ///
+    /// If the store is currently mmap-backed (read-only), it is MATERIALIZED first:
+    /// the mmap'd f32 region is copied into an owned `Vec` once and the mapping is
+    /// dropped, so the shard becomes mutable. This happens on the FIRST incremental
+    /// edit after a repo was cold-warmed from its persisted shard file — a one-time
+    /// ~payload-sized copy; subsequent edits are O(changed) on the now-in-RAM shard.
+    /// The shard stays resident and correct throughout (no re-warm, no DB round-trip).
+    #[inline]
+    fn ram_mut(&mut self) -> &mut Vec<f32> {
+        if let EmbeddingStore::Mmap { .. } = self {
+            // Materialize: copy the mmap'd payload to an owned Vec, drop the mapping.
+            let owned: Vec<f32> = self.as_slice().to_vec();
+            *self = EmbeddingStore::Ram(owned);
+        }
+        match self {
+            EmbeddingStore::Ram(v) => v,
+            EmbeddingStore::Mmap { .. } => unreachable!("materialized to Ram above"),
+        }
+    }
 }
 
 impl VectorIndex {
     /// Create an empty index.
     pub fn new() -> Self {
         Self {
-            embeddings: Vec::new(),
+            store: EmbeddingStore::Ram(Vec::new()),
             chunk_ids: Vec::new(),
             dim: 0,
         }
@@ -94,7 +150,7 @@ impl VectorIndex {
             }
 
             let normalized = l2_normalize(raw_emb);
-            self.embeddings.extend_from_slice(&normalized);
+            self.store.ram_mut().extend_from_slice(&normalized);
             self.chunk_ids.push(id.clone());
         }
     }
@@ -103,6 +159,7 @@ impl VectorIndex {
     ///
     /// Uses swap-remove to avoid O(n) shifts; moves whole `dim`-sized rows.
     pub fn remove_file(&mut self, file: &str) {
+        let emb = self.store.ram_mut();
         let mut i = 0;
         while i < self.chunk_ids.len() {
             if self.chunk_ids[i].file == file {
@@ -114,10 +171,10 @@ impl VectorIndex {
                     let src_start = last * self.dim;
                     let dst_start = i * self.dim;
                     // Safety: src and dst are non-overlapping (i < last).
-                    let src: Vec<f32> = self.embeddings[src_start..src_start + self.dim].to_vec();
-                    self.embeddings[dst_start..dst_start + self.dim].copy_from_slice(&src);
+                    let src: Vec<f32> = emb[src_start..src_start + self.dim].to_vec();
+                    emb[dst_start..dst_start + self.dim].copy_from_slice(&src);
                 }
-                self.embeddings.truncate(last * self.dim);
+                emb.truncate(last * self.dim);
                 // Don't advance i — the swapped element now lives at i.
             } else {
                 i += 1;
@@ -132,6 +189,7 @@ impl VectorIndex {
     ///
     /// Uses [`path_in_repo`] for boundary-safe matching. O(n) swap-remove pass.
     pub fn remove_repo(&mut self, repo: &str) {
+        let emb = self.store.ram_mut();
         let mut i = 0;
         while i < self.chunk_ids.len() {
             if path_in_repo(&self.chunk_ids[i].file, repo) {
@@ -140,10 +198,10 @@ impl VectorIndex {
                 if i < last {
                     let src_start = last * self.dim;
                     let dst_start = i * self.dim;
-                    let src: Vec<f32> = self.embeddings[src_start..src_start + self.dim].to_vec();
-                    self.embeddings[dst_start..dst_start + self.dim].copy_from_slice(&src);
+                    let src: Vec<f32> = emb[src_start..src_start + self.dim].to_vec();
+                    emb[dst_start..dst_start + self.dim].copy_from_slice(&src);
                 }
-                self.embeddings.truncate(last * self.dim);
+                emb.truncate(last * self.dim);
             } else {
                 i += 1;
             }
@@ -173,7 +231,7 @@ impl VectorIndex {
             );
             return;
         }
-        self.embeddings.extend_from_slice(&other.embeddings);
+        self.store.ram_mut().extend_from_slice(other.store.as_slice());
         self.chunk_ids.extend(other.chunk_ids);
     }
 
@@ -190,8 +248,12 @@ impl VectorIndex {
         let q_norm = l2_normalize(query);
 
         // Parallel dot product over rows. Each row is exactly `self.dim` floats.
+        // `embeddings_slice()` borrows the f32 region from either heap or mmap —
+        // the dot-product kernel is identical, so scores are bit-identical to the
+        // in-RAM path (exact, no quantization).
         let mut scored: Vec<(usize, f32)> = self
-            .embeddings
+            .store
+            .as_slice()
             .par_chunks(self.dim)
             .enumerate()
             .map(|(i, row)| (i, dot_product(&q_norm, row)))
@@ -279,21 +341,63 @@ impl VectorIndex {
 
     /// Remove all entries from the index.
     pub fn clear(&mut self) {
-        self.embeddings.clear();
+        self.store = EmbeddingStore::Ram(Vec::new());
         self.chunk_ids.clear();
         self.dim = 0;
     }
 
-    /// Total bytes occupied by the stored vector data.
-    ///
-    /// This is the resident-cap accounting metric: it counts ONLY the flat f32
-    /// embedding storage (`len * 4`), which is the dominant and predictable term
-    /// and matches the contract's "total resident vector bytes" definition. The
-    /// `chunk_ids` bookkeeping is comparatively negligible and intentionally
-    /// excluded so the cap maps cleanly to embedding payload.
+    /// HEAP bytes occupied by this shard — the resident-cap accounting metric.
+    /// In-RAM: the flat f32 storage (`len * 4`) — payload-only, as before.
+    /// MMAP: the f32 payload is page-cache-resident (NOT heap → 0); we instead
+    /// charge the heap-resident chunk-id sidecar so the cap stays meaningful for
+    /// mmap shards (bounds heap AND indirectly bounds open mmap handles — evicting
+    /// to honor the cap drops both the sidecar and the `Mmap` handle). The OS page
+    /// cache independently bounds the mmap payload's physical residency.
     #[inline]
     pub fn byte_size(&self) -> usize {
-        self.embeddings.len() * std::mem::size_of::<f32>()
+        match &self.store {
+            EmbeddingStore::Ram(v) => v.len() * std::mem::size_of::<f32>(),
+            EmbeddingStore::Mmap { .. } => self
+                .chunk_ids
+                .iter()
+                .map(|c| c.file.len() + 32)
+                .sum::<usize>(),
+        }
+    }
+
+    /// Dimensionality (0 if empty).
+    #[inline]
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Borrow the flat row-major f32 slice + chunk ids — used by the shard-file
+    /// writer to serialize an in-RAM shard to disk.
+    pub(crate) fn raw_parts(&self) -> (&[f32], &[ChunkId], usize) {
+        (self.store.as_slice(), &self.chunk_ids, self.dim)
+    }
+
+    /// Construct an MMAP-backed shard from a validated mapping + its chunk ids.
+    /// The caller (shard_file::open) has already validated header/length/alignment.
+    pub(crate) fn from_mmap(
+        map: memmap2::Mmap,
+        f32_off: usize,
+        f32_len: usize,
+        dim: usize,
+        chunk_ids: Vec<ChunkId>,
+    ) -> Self {
+        Self {
+            store: EmbeddingStore::Mmap { map, f32_off, f32_len },
+            chunk_ids,
+            dim,
+        }
+    }
+
+    /// True if this shard is mmap-backed (its f32 payload is page-cache-resident,
+    /// not heap). Used by the engine to skip heap-cap eviction of the payload.
+    #[inline]
+    pub fn is_mmap(&self) -> bool {
+        matches!(self.store, EmbeddingStore::Mmap { .. })
     }
 }
 
@@ -684,11 +788,11 @@ mod tests {
         let c3 = (chunk("/b/f3.rs", 1, 10), emb(dim, 3.0));
         index.insert(&[c1, c2, c3]);
         assert_eq!(index.len(), 3);
-        assert_eq!(index.embeddings.len(), 3 * dim);
+        assert_eq!(index.store.as_slice().len(), 3 * dim);
 
         index.remove_file("/a/f1.rs");
         assert_eq!(index.len(), 2);
-        assert_eq!(index.embeddings.len(), 2 * dim);
+        assert_eq!(index.store.as_slice().len(), 2 * dim);
 
         // All remaining files should NOT be /a/f1.rs
         for cid in &index.chunk_ids {

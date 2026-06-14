@@ -182,6 +182,41 @@ pub(crate) async fn warm_repo_shard(
         }
     };
     // DB scan happens here with NO vector_index lock held.
+    // First, the staleness stamp = current chunk-row count. Cheap; also tells us
+    // whether a persisted shard file is current.
+    let stamp = crate::store::ops::count_chunks(&db).await.unwrap_or(0);
+
+    // Fast path: a valid, current persisted shard file → mmap it (near-instant,
+    // no SELECT + decode). Its f32 payload is OS-page-cache-resident, off our heap.
+    // dim is unknown until we have a shard; probe the model dim from any one chunk
+    // via the file header's own dim (open_current validates it against expected).
+    // We pass the model dim by reading it from the file header indirectly: try the
+    // common dims is brittle, so we instead trust the header's dim and only reject
+    // on a mismatch with a known dim. Here we accept the file's own dim by passing
+    // it through a two-step: peek is folded into open_current (expected_dim=0 means
+    // "accept the header dim"). See shard_file::open_current.
+    match crate::vector::shard_file::open_current(data_dir, repo, 0, stamp) {
+        Ok(Some((shard, generation_loaded))) => {
+            let count = shard.len();
+            if count > 0 {
+                let mut vi = vector_index.write().await;
+                vi.install_shard(repo, shard, active);
+                // Reap stale generations now that the new one is installed; keep
+                // only the generation we just mapped (under the same write lock
+                // that governs CURRENT, so no reader/reaper race).
+                crate::vector::shard_file::reap_stale_generations(
+                    data_dir, repo, &[generation_loaded],
+                );
+                info!(repo = %repo, count, generation = generation_loaded, "warm: mmap'd persisted shard (no DB scan)");
+                return count;
+            }
+        }
+        Ok(None) => {} // no usable file — build from DB below
+        Err(e) => warn!(repo = %repo, error = %e, "warm: shard file open failed; rebuilding from DB"),
+    }
+
+    // Slow path: build from the chunk table (the existing SELECT + decode), then
+    // persist a new generation so subsequent warms mmap it.
     let shard = match VectorIndex::load_from_db(&db).await {
         Ok(vi) => vi,
         Err(e) => {
@@ -193,10 +228,31 @@ pub(crate) async fn warm_repo_shard(
     if count == 0 {
         return 0;
     }
-    // Short write lock: install the already-built shard. No DB work under the lock.
+    // Persist the built shard to a fresh generation + flip CURRENT (win32-safe:
+    // no existing mapped file is touched). Best-effort — a write failure just
+    // means the next warm rebuilds from DB again.
+    let persisted = match crate::vector::shard_file::write_new_generation(data_dir, repo, &shard, stamp) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            warn!(repo = %repo, error = %e, "warm: failed to persist shard file (will rebuild next warm)");
+            None
+        }
+    };
+    // Re-open the just-written file as an mmap so the resident shard is page-cache
+    // backed (not the heap copy we just built). Falls back to the heap shard if the
+    // re-open fails for any reason.
     let mut vi = vector_index.write().await;
-    vi.install_shard(repo, shard, active);
-    info!(repo = %repo, count, "warm: installed vector shard");
+    if let Some(g) = persisted
+        && let Ok(Some((mmap_shard, _))) = crate::vector::shard_file::open_current(data_dir, repo, shard.dim(), stamp)
+    {
+        vi.install_shard(repo, mmap_shard, active);
+        crate::vector::shard_file::reap_stale_generations(data_dir, repo, &[g]);
+        info!(repo = %repo, count, generation = g, "warm: built from DB, persisted + mmap'd shard");
+    } else {
+        // Heap fallback: install the in-RAM shard we built.
+        vi.install_shard(repo, shard, active);
+        info!(repo = %repo, count, "warm: installed in-RAM shard (persist/mmap unavailable)");
+    }
     count
 }
 
@@ -332,6 +388,23 @@ impl IndexEngine {
             let statuses_bg = Arc::clone(&engine.statuses);
             tokio::spawn(async move {
                 seed_statuses_from_db(&statuses_bg, &repo_dbs_bg, &data_dir_bg, &repos_bg, &generations_bg).await;
+            });
+        }
+
+        // Startup sweep: reap stale vector-shard generations. No mmap handles
+        // survive a restart, so every non-CURRENT generation dir is reapable. This
+        // bounds disk use across restarts (a crashed/aborted rewrite can leave an
+        // extra gen dir behind). Cheap (directory listing per repo); run in the
+        // background so it never delays boot.
+        {
+            let data_dir_sweep = engine.data_dir.clone();
+            let repos_sweep = settings.repos.clone();
+            tokio::spawn(async move {
+                for repo in repos_sweep {
+                    // keep=[] → reap everything except CURRENT (reap_stale_generations
+                    // always preserves the CURRENT gen internally).
+                    crate::vector::shard_file::reap_stale_generations(&data_dir_sweep, &repo, &[]);
+                }
             });
         }
 
@@ -815,6 +888,7 @@ async fn run_consumer(
                 .with_extra_extensions(settings_ref.custom_extensions.clone())
                 .with_ignore_filenames(settings_ref.index_ignore_filenames.clone())
                 .with_ignore_paths(per_repo_ignored_paths)
+                .with_data_dir(engine_ref.data_dir.clone())
         };
 
         match pipeline

@@ -799,6 +799,11 @@ async fn post_ignore_file(
         let mut vi = state.index_engine.vector_index.write().await;
         vi.apply_incremental(&repo, &[file_path], &[], &[]);
     }
+    // The shard changed → invalidate the persisted file so the next warm rebuilds it.
+    {
+        let root = crate::vector::shard_file::repo_shard_root(&state.index_engine.data_dir, &repo);
+        let _ = std::fs::remove_file(root.join("CURRENT"));
+    }
 
     // 3. Append relative path to per-repo ignored_paths.
     let mut ignored = store::ops::get_ignored_paths(&db).await.unwrap_or_default();

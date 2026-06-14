@@ -338,6 +338,10 @@ pub struct IndexPipeline {
     ignore_filenames: HashSet<String>,
     /// Per-repo ignored relative paths (forward-slash-normalized).
     ignore_paths: HashSet<String>,
+    /// Data dir for persisted vector shard files. When set, full rebuilds and
+    /// incremental updates invalidate the repo's persisted shard (delete CURRENT)
+    /// so the next warm rebuilds + re-persists it. None in tests that don't need it.
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl IndexPipeline {
@@ -347,7 +351,26 @@ impl IndexPipeline {
 
     pub fn new_with_concurrency(repo: String, voyage: Option<VoyageClient>, embed_concurrency: usize, cache: Option<EmbeddingCache>) -> Self {
         let embed_concurrency = embed_concurrency.max(1);
-        Self { repo, voyage, embed_concurrency, cache: cache.map(Arc::new), extra_extensions: vec![], ignore_filenames: HashSet::new(), ignore_paths: HashSet::new() }
+        Self { repo, voyage, embed_concurrency, cache: cache.map(Arc::new), extra_extensions: vec![], ignore_filenames: HashSet::new(), ignore_paths: HashSet::new(), data_dir: None }
+    }
+
+    /// Set the data dir so vector-changing operations invalidate the persisted
+    /// shard file (the engine sets this; tests that don't exercise persistence omit it).
+    pub fn with_data_dir(mut self, data_dir: std::path::PathBuf) -> Self {
+        self.data_dir = Some(data_dir);
+        self
+    }
+
+    /// Invalidate the repo's persisted vector shard (delete CURRENT) so the next
+    /// warm rebuilds + re-persists it. O(1) — does NOT rewrite the multi-GB file
+    /// on the hot path; the rewrite happens lazily at the next cold warm. No-op
+    /// when data_dir is unset. Old generation dirs are reaped by the warm/startup
+    /// sweep once unreferenced.
+    fn invalidate_persisted_shard(&self) {
+        if let Some(dd) = &self.data_dir {
+            let root = crate::vector::shard_file::repo_shard_root(dd, &self.repo);
+            let _ = std::fs::remove_file(root.join("CURRENT"));
+        }
     }
 
     pub fn with_extra_extensions(mut self, extra: Vec<String>) -> Self {
@@ -413,6 +436,10 @@ impl IndexPipeline {
                 // shared write lock, not the active set.
                 guard.replace_repo(&self.repo, &new_vectors, &[]);
             }
+            // The shard changed → invalidate the persisted file so the next warm
+            // rebuilds + re-persists it (lazy; O(1) here, no multi-GB rewrite on
+            // the hot path).
+            self.invalidate_persisted_shard();
             let indexed = get_all_file_meta(db, &self.repo).await?.len() as u64;
             info!(
                 repo = %self.repo,
@@ -544,6 +571,7 @@ impl IndexPipeline {
                         let mut guard = vi.write().await;
                         guard.replace_repo(&self.repo, &new_vectors, &[]);
                     }
+                    self.invalidate_persisted_shard();
                     let indexed = get_all_file_meta(db, &self.repo).await?.len() as u64;
                     let total_files = stored_meta.len() as u64;
                     return Ok(IndexPipelineStats {
@@ -585,6 +613,10 @@ impl IndexPipeline {
             // apply_incremental protects `self.repo` internally.
             guard.apply_incremental(&self.repo, &removed_files, &new_vectors, &[]);
         }
+        // Incremental changed the in-RAM shard → invalidate the persisted file
+        // (O(1)); it is rebuilt + re-persisted on the next cold warm. We do NOT
+        // rewrite the multi-GB file per incremental edit (would be O(repo)).
+        self.invalidate_persisted_shard();
 
         let indexed = get_all_file_meta(db, &self.repo).await?.len() as u64;
         Ok(IndexPipelineStats { indexed_files: indexed, total_files, ..Default::default() })
@@ -5795,6 +5827,78 @@ mod load_from_db_microbench {
              vs_warm_wait_50000ms={}",
             idx.len(),
             if warm_ms > 50_000 { "EXCEEDS (timeout->empty)" } else { "under" }
+        );
+    }
+}
+
+// Task 6.1: isolated mmap warm vs DB warm at kernel scale. Builds a kernel-sized
+// shard, persists it to a shard.f32 file, then measures the THREE numbers the
+// mmap change is justified by: (a) cold warm = DB load_from_db (the 25.7s we kill),
+// (b) warm-after-persist = mmap open (near-instant), (c) first-search page-fault
+// latency over the freshly-mapped shard (the OS faults cold pages on first scan).
+//   cargo test --release --lib mmap_warm_vs_db_warm_microbench -- --ignored --nocapture
+#[cfg(test)]
+mod mmap_warm_microbench {
+    use crate::vector::{shard_file, ChunkId, VectorIndex};
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn mmap_warm_vs_db_warm_microbench() {
+        let n: usize = std::env::var("MICROBENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(909_711);
+        let dim = 1024usize;
+        println!("mmap warm microbench: building {n} x {dim} shard in RAM ...");
+
+        // Build a kernel-sized in-RAM shard (deterministic synthetic vectors).
+        let mut ram = VectorIndex::new();
+        {
+            let mut pairs: Vec<(ChunkId, Vec<f32>)> = Vec::with_capacity(4096);
+            for i in 0..n {
+                let emb: Vec<f32> = (0..dim).map(|j| (((i * 31 + j * 17) % 1000) as f32) / 1000.0 - 0.5).collect();
+                pairs.push((ChunkId { file: format!("/repo/sub{}/f{}.c", i % 4096, i / 20), line_start: (i % 5000) as u32, line_end: (i % 5000 + 18) as u32 }, emb));
+                if pairs.len() >= 4096 { ram.insert(&pairs); pairs.clear(); }
+            }
+            if !pairs.is_empty() { ram.insert(&pairs); }
+        }
+        println!("  built in-RAM shard: len={}", ram.len());
+
+        let tmp = TempDir::new().unwrap();
+        let repo = "c:/users/0x317/downloads/linux";
+
+        // (b) Persist the shard to disk (this is what the slow-path warm does once).
+        let t_persist = Instant::now();
+        shard_file::write_new_generation(tmp.path(), repo, &ram, n as u64).unwrap();
+        let persist_ms = t_persist.elapsed().as_millis();
+
+        // Drop the in-RAM shard so the OS page cache for this file is the only
+        // residency; sleep briefly to let the writeback settle.
+        drop(ram);
+
+        // (b) WARM-AFTER-PERSIST = mmap open + validate (the near-instant warm).
+        let t_open = Instant::now();
+        let (mapped, _gen) = shard_file::open_current(tmp.path(), repo, dim, n as u64).unwrap().expect("opens");
+        let mmap_open_ms = t_open.elapsed().as_millis();
+
+        // (c) FIRST-SEARCH page-fault latency: first query faults cold pages in.
+        let q: Vec<f32> = (0..dim).map(|j| (j % 7) as f32 / 7.0).collect();
+        let t_first = Instant::now();
+        let r1 = mapped.search(&q, 30);
+        let first_search_ms = t_first.elapsed().as_millis();
+        // Second search: pages now resident → steady-state search latency.
+        let t_second = Instant::now();
+        let _ = mapped.search(&q, 30);
+        let second_search_ms = t_second.elapsed().as_millis();
+
+        println!(
+            "MMAP WARM RESULT n={n} | persist_ms={persist_ms} mmap_open_ms={mmap_open_ms} \
+             first_search_ms={first_search_ms} second_search_ms={second_search_ms} \
+             results={} | vs f32 DB warm baseline ~25,700ms (select ~16,600ms)",
+            r1.len()
+        );
+        println!(
+            "  => warm-after-persist (mmap_open + first_search) = {} ms vs DB warm ~25,700 ms",
+            mmap_open_ms + first_search_ms
         );
     }
 }
