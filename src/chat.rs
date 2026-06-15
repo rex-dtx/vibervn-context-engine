@@ -57,16 +57,39 @@ pub enum ChatEvent {
 /// least-recently-used conversation is evicted. Bounds RAM no matter how many
 /// dialogs are opened/closed over a session.
 const MAX_CONVERSATIONS: usize = 64;
-/// Hard cap on transcript turns kept per conversation (each turn = one user
-/// message plus one assistant message). Older turns are dropped so a single
-/// long-running conversation can't grow without bound.
+/// Hard cap on turns kept per conversation (each turn = one user message plus
+/// one assistant message, plus a compact tool-context summary). Older turns are
+/// dropped so a single long-running conversation can't grow without bound.
 const MAX_TURNS_KEPT: usize = 40;
 
-/// A single conversation's plain-text transcript plus the repo it is bound to.
+/// How many of the most-recent turns contribute their tool-context summary to
+/// the next question (K). Only recent search evidence is worth replaying; older
+/// turns fall out of the window.
+const TOOL_CTX_TURNS_KEPT: usize = 3;
+/// Hard byte cap on the tool-context summary STORED per turn. Enforced at store
+/// time so a single huge search result (kernel-scale) can never bloat the
+/// transcript — bounded memory regardless of repo size.
+const TOOL_CTX_PER_TURN_CAP: usize = 1500;
+/// Hard byte cap on the TOTAL tool-context injected into one question (across
+/// all K turns combined). The injected block is trimmed to this even if K turns
+/// each sit just under the per-turn cap.
+const TOOL_CTX_TOTAL_CAP: usize = 3000;
+
+/// A single completed turn: the user's question, the assistant's answer, and a
+/// compact, already-capped summary of the search evidence gathered during it
+/// (location headers + short previews — never full source). `tool_context` is
+/// empty for turns that ran no tools (pure chit-chat).
+struct Turn {
+    user: String,
+    answer: String,
+    tool_context: String,
+}
+
+/// A conversation: an ordered list of turns plus the repo it is bound to.
 struct Conversation {
     repo: String,
-    /// Alternating User/Model messages (oldest first). Never holds tool history.
-    transcript: Vec<ChatMessage>,
+    /// Completed turns, oldest first.
+    turns: Vec<Turn>,
     last_used: Instant,
 }
 
@@ -81,42 +104,90 @@ impl ConversationStore {
         Self::default()
     }
 
-    /// Return the transcript for `id` (empty if unknown), refreshing its LRU
-    /// stamp. If the id exists but is bound to a different repo, it is treated
-    /// as a fresh conversation for `repo` (defensive — ids are per-repo dialogs).
+    /// Return the plain User/Model transcript for `id` (empty if unknown),
+    /// refreshing its LRU stamp. If the id exists but is bound to a different
+    /// repo, it is treated as a fresh conversation for `repo` (defensive — ids
+    /// are per-repo dialogs). Tool-context is NOT included here; it is fetched
+    /// separately via [`Self::recent_tool_context`].
     async fn snapshot(&self, id: &str, repo: &str) -> Vec<ChatMessage> {
         let mut map = self.inner.lock().await;
         match map.get_mut(id) {
             Some(c) if c.repo == repo => {
                 c.last_used = Instant::now();
-                c.transcript.iter().map(clone_msg).collect()
+                let mut out = Vec::with_capacity(c.turns.len() * 2);
+                for t in &c.turns {
+                    out.push(ChatMessage::User(t.user.clone()));
+                    out.push(ChatMessage::Model(t.answer.clone()));
+                }
+                out
             }
             _ => Vec::new(),
         }
     }
 
-    /// Append one completed (user, assistant) turn to a conversation, creating
-    /// it if absent. Enforces both caps (turns-per-conversation, then global
-    /// LRU count).
-    async fn append_turn(&self, id: &str, repo: &str, user: String, answer: String) {
+    /// Build the tool-context block to replay into the NEXT question: the
+    /// summaries of the last [`TOOL_CTX_TURNS_KEPT`] turns that actually ran a
+    /// search, newest last, joined and hard-capped at [`TOOL_CTX_TOTAL_CAP`]
+    /// bytes. Returns an empty string when there is nothing to replay.
+    async fn recent_tool_context(&self, id: &str, repo: &str) -> String {
+        let mut map = self.inner.lock().await;
+        let Some(c) = map.get_mut(id) else {
+            return String::new();
+        };
+        if c.repo != repo {
+            return String::new();
+        }
+        c.last_used = Instant::now();
+
+        // Walk the most-recent turns (newest first), collecting non-empty
+        // summaries up to K, then re-order oldest→newest for natural reading.
+        let mut picked: Vec<&str> = Vec::new();
+        for t in c.turns.iter().rev() {
+            if picked.len() >= TOOL_CTX_TURNS_KEPT {
+                break;
+            }
+            if !t.tool_context.is_empty() {
+                picked.push(&t.tool_context);
+            }
+        }
+        if picked.is_empty() {
+            return String::new();
+        }
+        picked.reverse();
+        let joined = picked.join("\n\n");
+        truncate_bytes(&joined, TOOL_CTX_TOTAL_CAP)
+    }
+
+    /// Append one completed turn to a conversation, creating it if absent.
+    /// `tool_context` is capped to [`TOOL_CTX_PER_TURN_CAP`] bytes before
+    /// storage. Enforces both caps (turns-per-conversation, then global LRU).
+    async fn append_turn(
+        &self,
+        id: &str,
+        repo: &str,
+        user: String,
+        answer: String,
+        tool_context: String,
+    ) {
         let mut map = self.inner.lock().await;
         let conv = map.entry(id.to_owned()).or_insert_with(|| Conversation {
             repo: repo.to_owned(),
-            transcript: Vec::new(),
+            turns: Vec::new(),
             last_used: Instant::now(),
         });
         // A repo mismatch means the id was reused across dialogs — reset it.
         if conv.repo != repo {
             conv.repo = repo.to_owned();
-            conv.transcript.clear();
+            conv.turns.clear();
         }
-        conv.transcript.push(ChatMessage::User(user));
-        conv.transcript.push(ChatMessage::Model(answer));
+        // Cap the stored summary at store time — the single enforcement point.
+        let tool_context = truncate_bytes(&tool_context, TOOL_CTX_PER_TURN_CAP);
+        conv.turns.push(Turn { user, answer, tool_context });
         conv.last_used = Instant::now();
 
-        // Trim oldest turns (2 messages per turn).
-        while conv.transcript.len() > MAX_TURNS_KEPT * 2 {
-            conv.transcript.drain(0..2);
+        // Trim oldest turns.
+        while conv.turns.len() > MAX_TURNS_KEPT {
+            conv.turns.remove(0);
         }
 
         // Global LRU eviction.
@@ -137,16 +208,18 @@ impl ConversationStore {
     }
 }
 
-/// Clone a [`ChatMessage`]. Only User/Model variants ever live in a transcript,
-/// but the match is exhaustive so future variants force a decision here.
-fn clone_msg(m: &ChatMessage) -> ChatMessage {
-    match m {
-        ChatMessage::User(t) => ChatMessage::User(t.clone()),
-        ChatMessage::Model(t) => ChatMessage::Model(t.clone()),
-        // Tool history is never stored in a transcript; reconstruct defensively.
-        ChatMessage::ModelToolCalls(_) => ChatMessage::Model(String::new()),
-        ChatMessage::ToolResults(_) => ChatMessage::User(String::new()),
+/// Truncate `s` to at most `max_bytes`, never splitting a UTF-8 char, appending
+/// an elision marker when anything was cut. Used to hard-bound every stored and
+/// replayed tool-context string.
+fn truncate_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
     }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 // ─── Tool definitions (the ONLY two the agent may call) ───────────────────
@@ -205,14 +278,34 @@ You have exactly two tools: `{TOOL_CODEBASE}` (semantic search over the whole re
 `{TOOL_FILE}` (retrieve chunks of one specific file). You have NO other tools and NO direct \
 filesystem or shell access. Do not claim to run commands, open files directly, or use any tool \
 other than these two.\n\n\
-Guidelines:\n\
-- For almost every question, call `{TOOL_CODEBASE}` first to gather real context before \
-answering. Do not guess about the codebase from memory.\n\
-- Use `{TOOL_FILE}` to dig deeper into a specific file once you know which one matters.\n\
-- You may call the tools multiple times to refine your understanding.\n\
-- Ground your answer in what the tools returned. Cite file paths and line ranges (e.g. \
+Core principle: GATHER ENOUGH EVIDENCE BEFORE YOU ANSWER. A confidently wrong answer is the \
+worst outcome. It is always better to keep searching, or to admit a gap, than to guess. Never \
+answer a question about how the code works from memory or assumption — every factual claim about \
+this repository must be grounded in something a tool actually returned this turn.\n\n\
+How to work:\n\
+- For any question about the codebase, call `{TOOL_CODEBASE}` first. Do not answer before you \
+have called it at least once for the current question.\n\
+- Treat the first result as a starting point, not the final answer. Before answering, check: does \
+the context I have actually cover EVERY part of the question? If the question has multiple parts, \
+each part needs its own evidence.\n\
+- If the results are thin, empty, off-topic, or only partially answer the question, DO NOT answer \
+yet. Search again with a different phrasing or a more specific angle, or use `{TOOL_FILE}` to read \
+more of a file that a previous result pointed you to. Keep going until the context genuinely \
+answers the question.\n\
+- You decide how many searches are enough — use as many tool calls as the question needs (you \
+have a limited budget of rounds, so make each search count and stop once you truly have enough).\n\
+- Pure chit-chat or meta turns (e.g. \"thanks\", \"explain that again\") do not need a new search \
+— answer from the conversation so far.\n\n\
+Answering:\n\
+- Ground every factual claim in what the tools returned. Cite file paths and line ranges (e.g. \
 `src/foo.rs#L10-40`) when relevant.\n\
-- If the tools return no useful context, say so honestly rather than inventing details.\n\
+- SAFE ANSWER POLICY: if, after searching, you still cannot find evidence for some part of the \
+question, explicitly say what you could NOT find or are NOT sure about for that part, and answer \
+only the parts you actually verified. Never paper over a gap by inventing plausible-sounding \
+details. Partial-but-honest beats complete-but-wrong.\n\
+- If searching turned up essentially nothing relevant, say plainly that the index has no useful \
+context for this question (and suggest the user rephrase or check the file directly) rather than \
+fabricating an answer.\n\
 - Answer in the same language the user asked in. Keep technical terms in their original form."
     )
 }
@@ -293,6 +386,100 @@ fn preview(text: &str) -> String {
     }
 }
 
+// ─── Tool-context summarization (cross-turn memory) ───────────────────────
+
+/// Max location headers kept from one tool result's summary. A search returns
+/// many blocks; we keep the top handful so the next turn knows roughly what was
+/// already found without replaying full source.
+const MAX_LOCATIONS_PER_RESULT: usize = 8;
+/// Chars of the first content line kept as a per-location preview.
+const LOCATION_PREVIEW_CHARS: usize = 80;
+
+/// Whether a line looks like a retrieval location header (`path#L10-40…`) rather
+/// than a numbered source line. Headers carry `#L<digit>` and are not indented.
+fn is_location_header(line: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    if let Some(pos) = line.find("#L") {
+        return line[pos + 2..].starts_with(|c: char| c.is_ascii_digit());
+    }
+    false
+}
+
+/// Build a compact, capped summary of ONE tool result for cross-turn replay:
+/// the leading location headers (`path#L10-40`) each followed by a short preview
+/// of their first content line. Never includes full source. The `label`
+/// (information_request / file path) anchors what the search was for.
+///
+/// The output is intentionally small; the store still hard-caps it again at
+/// [`TOOL_CTX_PER_TURN_CAP`], so this is a best-effort shrink, not the bound.
+fn summarize_tool_result(label: &str, output: &str) -> String {
+    // Errors / "use grep" guidance carry no locations worth replaying.
+    if output.starts_with("Error:") {
+        return String::new();
+    }
+
+    let mut locations: Vec<String> = Vec::new();
+    let mut lines = output.lines().peekable();
+    while let Some(line) = lines.next() {
+        if !is_location_header(line) {
+            continue;
+        }
+        // Peek the next non-empty line as a one-line preview of the block.
+        let preview_line = lines
+            .peek()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !is_location_header(l))
+            .map(|l| {
+                let mut s: String = l.chars().take(LOCATION_PREVIEW_CHARS).collect();
+                if l.chars().count() > LOCATION_PREVIEW_CHARS {
+                    s.push('…');
+                }
+                s
+            })
+            .unwrap_or_default();
+
+        if preview_line.is_empty() {
+            locations.push(format!("- {}", line.trim()));
+        } else {
+            locations.push(format!("- {}  ({preview_line})", line.trim()));
+        }
+        if locations.len() >= MAX_LOCATIONS_PER_RESULT {
+            break;
+        }
+    }
+
+    if locations.is_empty() {
+        return String::new();
+    }
+    let label = label.trim();
+    if label.is_empty() {
+        locations.join("\n")
+    } else {
+        format!("search: {label}\n{}", locations.join("\n"))
+    }
+}
+
+/// Prepend the prior-turns tool-context block to the new question so the model
+/// can reuse earlier search evidence instead of blindly re-searching. Framed as
+/// reference material, NOT as ground truth — the model must still verify with a
+/// fresh search when the prior evidence doesn't cover the new question.
+///
+/// `pub` so wire/integration tests can prove the augmented question (carrying
+/// prior tool-context) is what actually reaches the provider.
+pub fn augment_question_with_context(tool_context: &str, message: &str) -> String {
+    if tool_context.trim().is_empty() {
+        return message.to_owned();
+    }
+    format!(
+        "[Context from earlier in this conversation — files and ranges already \
+found via search. Reuse this to stay consistent; search again only if it does \
+not cover the new question, and do not treat it as a substitute for verifying \
+current details.]\n{tool_context}\n\n[Current question]\n{message}"
+    )
+}
+
 // ─── The streaming agentic loop ───────────────────────────────────────────
 
 /// Inputs the loop needs. Grouped to keep the signature readable.
@@ -324,11 +511,18 @@ pub async fn run_chat_turn(
     let system = system_prompt(repo);
     let cache_key = format!("repo-chat-{}", crate::store::sanitize_repo_name(repo));
 
-    // Seed the working context with the prior transcript + this question.
+    // Seed the working context with the prior transcript + this question. The
+    // question is augmented with a compact summary of the search evidence from
+    // the last K turns so the model can build on it instead of re-searching
+    // from scratch (cross-turn memory; bounded by the store's byte caps).
     let mut messages: Vec<ChatMessage> = deps.conversations.snapshot(conversation_id, repo).await;
-    messages.push(ChatMessage::User(message.to_owned()));
+    let prior_context = deps.conversations.recent_tool_context(conversation_id, repo).await;
+    messages.push(ChatMessage::User(augment_question_with_context(&prior_context, message)));
 
     let mut answer = String::new();
+    // Accumulates the summaries of every search this turn runs, for storage so
+    // the NEXT turn can reuse them. Capped again at store time.
+    let mut turn_tool_context = String::new();
 
     for _turn in 0..MAX_TURNS {
         // Stream this turn. Text deltas are forwarded live as Token events.
@@ -343,7 +537,7 @@ pub async fn run_chat_turn(
                 &messages,
                 &tools,
                 0.2,
-                false, // never force tool use — the model may answer directly
+                false, // the model decides when to search; the prompt drives it
                 Some(&cache_key),
                 &on_token,
             )
@@ -365,7 +559,7 @@ pub async fn run_chat_turn(
                     let summary = tool_summary(&call.name, &call.args);
                     let _ = tx.send(ChatEvent::ToolCall {
                         name: call.name.clone(),
-                        summary,
+                        summary: summary.clone(),
                     });
 
                     let (out, ok) = run_tool(deps, repo, &call.name, &call.args).await;
@@ -375,6 +569,18 @@ pub async fn run_chat_turn(
                         ok,
                         preview: preview(&out),
                     });
+
+                    // Fold a compact summary of this result into the turn's
+                    // cross-turn memory (best-effort; store enforces the cap).
+                    if ok {
+                        let s = summarize_tool_result(&summary, &out);
+                        if !s.is_empty() {
+                            if !turn_tool_context.is_empty() {
+                                turn_tool_context.push_str("\n\n");
+                            }
+                            turn_tool_context.push_str(&s);
+                        }
+                    }
 
                     results.push(ToolResult {
                         name: call.name.clone(),
@@ -395,17 +601,72 @@ pub async fn run_chat_turn(
     }
 
     if answer.is_empty() {
-        // Hit the turn cap without a final text answer.
-        let _ = tx.send(ChatEvent::Error {
-            message: "The assistant could not finish answering (too many tool calls). \
-                      Try rephrasing the question."
+        // We exhausted the tool-calling budget without the model producing a
+        // final text answer (it kept searching). Rather than dead-ending with an
+        // error, make ONE last pass with no tools available, forcing the model to
+        // synthesize a safe answer from whatever context it has already gathered
+        // — honestly flagging gaps instead of guessing. This is the graceful
+        // "ran out of searches → say what you can, admit the rest" exit.
+        let token_tx = tx.clone();
+        // Track whether the final pass actually streamed any token. `started` in
+        // the llm layer is internal and invisible here, so we observe emission
+        // directly: if even one token reached the user, appending the fallback
+        // sentence would produce "half-answer + fallback" garble — so we only
+        // emit the fallback when nothing was streamed.
+        let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let streamed_cb = streamed.clone();
+        let on_token = move |t: &str| {
+            if !t.is_empty() {
+                streamed_cb.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let _ = token_tx.send(ChatEvent::Token { text: t.to_owned() });
+        };
+        messages.push(ChatMessage::User(
+            "You have used up your search budget for this question. Do not request any more \
+             tools. Answer now using only the context already gathered above. State clearly \
+             which parts of the question you could verify and which parts you could not find \
+             enough evidence for — do not invent details for the gaps."
                 .to_owned(),
-        });
-        return;
+        ));
+        // Pass an empty tool list so no further tool calls are possible.
+        match llm
+            .complete_with_tools_streaming(
+                &system, &messages, &[], 0.2, false, Some(&cache_key), &on_token,
+            )
+            .await
+        {
+            Ok(ToolTurnResult::Text(text)) if !text.trim().is_empty() => answer = text,
+            // The model produced no usable accumulated text, or the call failed.
+            // Emit a plain honest fallback — but ONLY if nothing was streamed,
+            // so we never glue a fallback sentence onto a half-streamed answer.
+            // If tokens already reached the user (mid-stream failure with empty
+            // accumulation), leave `answer` for the guard below to backfill so
+            // the transcript isn't empty, without emitting more visible text.
+            _ => {
+                if !streamed.load(std::sync::atomic::Ordering::Relaxed) {
+                    let fallback = "I couldn't gather enough indexed context to answer this \
+                        confidently. Try rephrasing the question, narrowing it to one part, or \
+                        pointing me at a specific file."
+                        .to_owned();
+                    let _ = tx.send(ChatEvent::Token {
+                        text: fallback.clone(),
+                    });
+                    answer = fallback;
+                }
+            }
+        }
+    }
+
+    // The final-pass branch above may leave `answer` empty only if the stream
+    // emitted tokens but returned no usable accumulated text — extremely rare,
+    // but guard the transcript against storing an empty assistant turn.
+    if answer.trim().is_empty() {
+        answer = "I couldn't gather enough indexed context to answer this confidently."
+            .to_owned();
     }
 
     deps.conversations
-        .append_turn(conversation_id, repo, message.to_owned(), answer)
+        .append_turn(conversation_id, repo, message.to_owned(), answer, turn_tool_context)
         .await;
     let _ = tx.send(ChatEvent::Done);
 }
@@ -453,7 +714,7 @@ mod tests {
         for i in 0..(MAX_CONVERSATIONS + 5) {
             let id = format!("conv-{i}");
             store
-                .append_turn(&id, "/repo", "q".to_owned(), "a".to_owned())
+                .append_turn(&id, "/repo", "q".to_owned(), "a".to_owned(), String::new())
                 .await;
         }
         let map = store.inner.lock().await;
@@ -465,18 +726,18 @@ mod tests {
         let store = ConversationStore::new();
         for i in 0..(MAX_TURNS_KEPT + 10) {
             store
-                .append_turn("c1", "/repo", format!("q{i}"), format!("a{i}"))
+                .append_turn("c1", "/repo", format!("q{i}"), format!("a{i}"), String::new())
                 .await;
         }
         let map = store.inner.lock().await;
         let conv = map.get("c1").unwrap();
-        assert!(conv.transcript.len() <= MAX_TURNS_KEPT * 2);
+        assert!(conv.turns.len() <= MAX_TURNS_KEPT);
     }
 
     #[tokio::test]
     async fn drop_removes_conversation() {
         let store = ConversationStore::new();
-        store.append_turn("c1", "/repo", "q".to_owned(), "a".to_owned()).await;
+        store.append_turn("c1", "/repo", "q".to_owned(), "a".to_owned(), String::new()).await;
         store.drop_conversation("c1").await;
         assert!(store.inner.lock().await.get("c1").is_none());
     }
@@ -484,10 +745,162 @@ mod tests {
     #[tokio::test]
     async fn snapshot_resets_on_repo_mismatch() {
         let store = ConversationStore::new();
-        store.append_turn("c1", "/repo-a", "q".to_owned(), "a".to_owned()).await;
+        store.append_turn("c1", "/repo-a", "q".to_owned(), "a".to_owned(), String::new()).await;
         // Same id, different repo → treated as empty (fresh) conversation.
         let snap = store.snapshot("c1", "/repo-b").await;
         assert!(snap.is_empty());
+    }
+
+    // ─── Cross-turn tool-context ──────────────────────────────────────────
+
+    #[test]
+    fn truncate_bytes_caps_and_marks() {
+        let s = "a".repeat(100);
+        let t = truncate_bytes(&s, 10);
+        assert!(t.ends_with('…'));
+        // 10 bytes of content + the multi-byte ellipsis.
+        assert!(t.len() <= 10 + '…'.len_utf8());
+    }
+
+    #[test]
+    fn truncate_bytes_keeps_short() {
+        assert_eq!(truncate_bytes("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_bytes_respects_char_boundary() {
+        // Multi-byte chars must never be split mid-codepoint.
+        let s = "é".repeat(50); // each 'é' is 2 bytes
+        let t = truncate_bytes(&s, 5);
+        assert!(t.ends_with('…'));
+        // Must still be valid UTF-8 (no panic on slicing) — implicit by reaching here.
+    }
+
+    #[test]
+    fn is_location_header_detects_path_ranges() {
+        assert!(is_location_header("src/foo.rs#L10-40"));
+        assert!(is_location_header("a/b/c.py#L1-2 [callers: 3]"));
+        // Numbered source lines and indented lines are not headers.
+        assert!(!is_location_header("   10: let x = 1;"));
+        assert!(!is_location_header("fn main() {"));
+        assert!(!is_location_header("path#Lstart")); // no digit after #L
+    }
+
+    #[test]
+    fn summarize_extracts_locations_with_previews() {
+        let output = "src/a.rs#L1-5\n1: fn a() {}\n\nsrc/b.rs#L9-12\n9: struct B;";
+        let s = summarize_tool_result("how does a work", output);
+        assert!(s.contains("search: how does a work"));
+        assert!(s.contains("src/a.rs#L1-5"));
+        assert!(s.contains("src/b.rs#L9-12"));
+        // Preview text from the first content line is included.
+        assert!(s.contains("fn a()"));
+    }
+
+    #[test]
+    fn summarize_ignores_errors() {
+        assert!(summarize_tool_result("x", "Error: no index").is_empty());
+    }
+
+    #[test]
+    fn summarize_caps_location_count() {
+        let mut output = String::new();
+        for i in 0..(MAX_LOCATIONS_PER_RESULT + 10) {
+            output.push_str(&format!("src/f{i}.rs#L1-2\n1: code\n\n"));
+        }
+        let s = summarize_tool_result("many", &output);
+        let count = s.matches("#L").count();
+        assert_eq!(count, MAX_LOCATIONS_PER_RESULT, "must cap locations per result");
+    }
+
+    #[test]
+    fn augment_noop_when_no_context() {
+        assert_eq!(augment_question_with_context("", "hello"), "hello");
+        assert_eq!(augment_question_with_context("   ", "hello"), "hello");
+    }
+
+    #[test]
+    fn augment_embeds_context_and_question() {
+        let out = augment_question_with_context("src/a.rs#L1-5", "what next?");
+        assert!(out.contains("src/a.rs#L1-5"));
+        assert!(out.contains("what next?"));
+        assert!(out.contains("[Current question]"));
+    }
+
+    #[tokio::test]
+    async fn recent_tool_context_replays_recent_turns() {
+        let store = ConversationStore::new();
+        store.append_turn("c1", "/r", "q1".into(), "a1".into(), "ctx-1".into()).await;
+        store.append_turn("c1", "/r", "q2".into(), "a2".into(), "ctx-2".into()).await;
+        let ctx = store.recent_tool_context("c1", "/r").await;
+        assert!(ctx.contains("ctx-1"));
+        assert!(ctx.contains("ctx-2"));
+        // Oldest-first ordering.
+        assert!(ctx.find("ctx-1").unwrap() < ctx.find("ctx-2").unwrap());
+    }
+
+    #[tokio::test]
+    async fn recent_tool_context_windows_to_k_turns() {
+        let store = ConversationStore::new();
+        for i in 0..(TOOL_CTX_TURNS_KEPT + 3) {
+            store
+                .append_turn("c1", "/r", format!("q{i}"), format!("a{i}"), format!("ctx-{i}"))
+                .await;
+        }
+        let ctx = store.recent_tool_context("c1", "/r").await;
+        // The oldest summaries fall outside the K-turn window.
+        assert!(!ctx.contains("ctx-0"));
+        // The newest K are present.
+        let newest = TOOL_CTX_TURNS_KEPT + 2;
+        assert!(ctx.contains(&format!("ctx-{newest}")));
+    }
+
+    #[tokio::test]
+    async fn recent_tool_context_skips_empty_summaries() {
+        let store = ConversationStore::new();
+        // Chit-chat turns (no search) store empty tool_context and are skipped.
+        store.append_turn("c1", "/r", "hi".into(), "hello".into(), String::new()).await;
+        store.append_turn("c1", "/r", "q".into(), "a".into(), "real-ctx".into()).await;
+        store.append_turn("c1", "/r", "thanks".into(), "yw".into(), String::new()).await;
+        let ctx = store.recent_tool_context("c1", "/r").await;
+        assert_eq!(ctx, "real-ctx");
+    }
+
+    #[tokio::test]
+    async fn per_turn_context_capped_at_store_time() {
+        let store = ConversationStore::new();
+        let huge = "x".repeat(TOOL_CTX_PER_TURN_CAP * 4);
+        store.append_turn("c1", "/r", "q".into(), "a".into(), huge).await;
+        let map = store.inner.lock().await;
+        let conv = map.get("c1").unwrap();
+        // Stored summary must be hard-bounded regardless of input size.
+        assert!(conv.turns[0].tool_context.len() <= TOOL_CTX_PER_TURN_CAP + '…'.len_utf8());
+    }
+
+    #[tokio::test]
+    async fn total_injected_context_capped_across_turns() {
+        let store = ConversationStore::new();
+        // Each turn sits near the per-turn cap; K of them combined would exceed
+        // the total cap, so the injected block must be trimmed to it.
+        let near_cap = "y".repeat(TOOL_CTX_PER_TURN_CAP - 10);
+        for i in 0..TOOL_CTX_TURNS_KEPT {
+            store
+                .append_turn("c1", "/r", format!("q{i}"), format!("a{i}"), near_cap.clone())
+                .await;
+        }
+        let ctx = store.recent_tool_context("c1", "/r").await;
+        assert!(
+            ctx.len() <= TOOL_CTX_TOTAL_CAP + '…'.len_utf8(),
+            "total injected context must be bounded; got {} bytes",
+            ctx.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_tool_context_resets_on_repo_mismatch() {
+        let store = ConversationStore::new();
+        store.append_turn("c1", "/r-a", "q".into(), "a".into(), "ctx".into()).await;
+        assert!(store.recent_tool_context("c1", "/r-b").await.is_empty());
     }
 }
 

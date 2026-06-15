@@ -1130,3 +1130,248 @@ async fn test_plan_proxy_forwards_machine_id_and_injects_base_url() {
         std::env::remove_var("CONTEXT_ENGINE_ADMIN_URL");
     }
 }
+
+/// Wire-level proof that prior conversation history reaches the LLM provider.
+///
+/// Spins up a mock OpenAI chat-completions endpoint that captures the raw
+/// request body, drives a real `LlmClient::complete_with_tools_streaming` call
+/// with a 3-turn transcript (User → Model → User), and asserts the serialized
+/// `messages` array on the wire carries every prior turn — not just the latest
+/// question. This isolates the claim "history thực sự tới được provider".
+#[tokio::test]
+async fn chat_history_reaches_provider_on_wire() {
+    use std::sync::Mutex;
+
+    use axum::{Router, response::Response, routing::post};
+    use context_engine_rs::config::LlmConfig;
+    use context_engine_rs::llm::{ChatMessage, LlmClient, ToolTurnResult};
+
+    // Shared slot the mock handler fills with the incoming JSON body so the test
+    // can inspect exactly what hit the wire after the call returns.
+    let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let captured_handler = captured.clone();
+
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: axum::body::Bytes| {
+            let captured = captured_handler.clone();
+            async move {
+                // Record the raw request body for later assertions.
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(&body).expect("request body is JSON");
+                *captured.lock().unwrap() = Some(parsed);
+
+                // The call under test uses `stream: true`, so the client parses
+                // an SSE body split on "\n\n" (see openai::complete_with_tools_streaming).
+                // Return one assistant content frame followed by [DONE].
+                let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"evicted via LRU\"}}]}\n\n\
+                           data: [DONE]\n\n";
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(axum::body::Body::from(sse))
+                    .expect("build SSE response")
+            }
+        }),
+    );
+
+    let mock_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let mock_addr = mock_listener.local_addr().expect("mock addr");
+    tokio::spawn(async move {
+        axum::serve(mock_listener, mock).await.expect("mock server");
+    });
+
+    // Build an LlmClient pointed at the mock. base_url is the bare `…/v1` form;
+    // openai::chat_url appends `/chat/completions`, matching the mock route.
+    let config = LlmConfig {
+        provider: "openai".to_owned(),
+        rerank_model: "gpt-4o-mini".to_owned(),
+        api_keys: vec!["test-key".to_owned()],
+        openai_base_url: Some(format!("http://{mock_addr}/v1")),
+        ..LlmConfig::default()
+    };
+    let client = LlmClient::new(&config).expect("client builds with one key");
+
+    // A 3-turn transcript: the latest question plus two prior turns that must
+    // also be serialized to the wire.
+    let contents = vec![
+        ChatMessage::User("What is the vector index?".to_owned()),
+        ChatMessage::Model("It is sharded per repo.".to_owned()),
+        ChatMessage::User("How is it evicted?".to_owned()),
+    ];
+
+    let on_token = |_t: &str| {};
+    let result = client
+        .complete_with_tools_streaming(
+            "You are a helpful assistant.",
+            &contents,
+            &[],
+            0.2,
+            false,
+            Some("test"),
+            &on_token,
+        )
+        .await
+        .expect("streaming call succeeds against mock");
+
+    // Sanity: the SSE body parsed into assistant text.
+    match result {
+        ToolTurnResult::Text(t) => assert_eq!(t, "evicted via LRU"),
+        ToolTurnResult::ToolCalls(_) => panic!("expected text, got tool calls"),
+    }
+
+    // Inspect what actually hit the wire.
+    let body = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("mock captured a request body");
+
+    let messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .unwrap_or_else(|| panic!("messages must be an array; got body: {body}"));
+
+    // System message must be present at index 0.
+    let first = &messages[0];
+    assert_eq!(
+        first.get("role").and_then(|v| v.as_str()),
+        Some("system"),
+        "index 0 must be the system message; got body: {body}"
+    );
+
+    // Helper: does the array contain a message with this exact role+content?
+    let has = |role: &str, content: &str| {
+        messages.iter().any(|m| {
+            m.get("role").and_then(|v| v.as_str()) == Some(role)
+                && m.get("content").and_then(|v| v.as_str()) == Some(content)
+        })
+    };
+
+    // Every prior turn — not just the latest question — must be on the wire.
+    assert!(
+        has("user", "What is the vector index?"),
+        "first user turn missing from wire; got body: {body}"
+    );
+    assert!(
+        has("assistant", "It is sharded per repo."),
+        "prior model turn missing from wire; got body: {body}"
+    );
+    assert!(
+        has("user", "How is it evicted?"),
+        "latest user turn missing from wire; got body: {body}"
+    );
+}
+
+/// Wire-level proof that the PRIOR-TURN tool-context (the cross-turn memory of
+/// what earlier searches found) is folded into the new question and reaches the
+/// provider. This is the black-and-white check for the "follow-up reuses prior
+/// search evidence" fix: the augmented question carrying `path#Lrange` location
+/// summaries must appear in the on-wire `messages`, not be silently dropped.
+#[tokio::test]
+async fn tool_context_reaches_provider_on_wire() {
+    use std::sync::Mutex;
+
+    use axum::{Router, response::Response, routing::post};
+    use context_engine_rs::chat::augment_question_with_context;
+    use context_engine_rs::config::LlmConfig;
+    use context_engine_rs::llm::{ChatMessage, LlmClient, ToolTurnResult};
+
+    let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let captured_handler = captured.clone();
+
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: axum::body::Bytes| {
+            let captured = captured_handler.clone();
+            async move {
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(&body).expect("request body is JSON");
+                *captured.lock().unwrap() = Some(parsed);
+                let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                           data: [DONE]\n\n";
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(axum::body::Body::from(sse))
+                    .expect("build SSE response")
+            }
+        }),
+    );
+
+    let mock_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let mock_addr = mock_listener.local_addr().expect("mock addr");
+    tokio::spawn(async move {
+        axum::serve(mock_listener, mock).await.expect("mock server");
+    });
+
+    let config = LlmConfig {
+        provider: "openai".to_owned(),
+        rerank_model: "gpt-4o-mini".to_owned(),
+        api_keys: vec!["test-key".to_owned()],
+        openai_base_url: Some(format!("http://{mock_addr}/v1")),
+        ..LlmConfig::default()
+    };
+    let client = LlmClient::new(&config).expect("client builds with one key");
+
+    // Build the latest user message exactly as run_chat_turn does: the new
+    // question augmented with the prior-turn tool-context summary.
+    let prior_context = "search: how is the vector index sharded\n\
+                         - src/vector/mod.rs#L10-40  (pub struct ShardedVectorIndex)";
+    let new_question = "how is a shard evicted?";
+    let augmented = augment_question_with_context(prior_context, new_question);
+
+    let contents = vec![
+        ChatMessage::User("how is the vector index sharded?".to_owned()),
+        ChatMessage::Model("It is sharded per repo via ShardedVectorIndex.".to_owned()),
+        ChatMessage::User(augmented),
+    ];
+
+    let on_token = |_t: &str| {};
+    let result = client
+        .complete_with_tools_streaming(
+            "You are a helpful assistant.",
+            &contents,
+            &[],
+            0.2,
+            false,
+            Some("test"),
+            &on_token,
+        )
+        .await
+        .expect("streaming call succeeds against mock");
+    match result {
+        ToolTurnResult::Text(t) => assert_eq!(t, "ok"),
+        ToolTurnResult::ToolCalls(_) => panic!("expected text"),
+    }
+
+    let body = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("mock captured a request body");
+    let messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .unwrap_or_else(|| panic!("messages must be an array; got body: {body}"));
+
+    // The last message is the augmented user turn. It must carry BOTH the prior
+    // location summary AND the new question, on the wire.
+    let last = messages.last().expect("at least one message");
+    let last_content = last
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("last message has string content; got body: {body}"));
+
+    assert_eq!(last.get("role").and_then(|v| v.as_str()), Some("user"));
+    assert!(
+        last_content.contains("src/vector/mod.rs#L10-40"),
+        "prior tool-context location missing from wire; got: {last_content}"
+    );
+    assert!(
+        last_content.contains(new_question),
+        "new question missing from wire; got: {last_content}"
+    );
+    assert!(
+        last_content.contains("[Current question]"),
+        "augmentation framing missing from wire; got: {last_content}"
+    );
+}
