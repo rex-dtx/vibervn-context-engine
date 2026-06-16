@@ -1194,6 +1194,19 @@
     </div>
     <!-- Composer -->
     <div class="border-t border-gray-200 dark:border-wiki-border px-4 py-3">
+      <!-- Model picker row: choose the Settings default or a custom endpoint model -->
+      <div class="flex items-center gap-2 mb-2">
+        <label for="chat-model-select" data-i18n="chat.model"
+               class="text-[11px] font-medium text-gray-500 dark:text-wiki-text-muted shrink-0">Model</label>
+        <select id="chat-model-select"
+                class="flex-1 min-w-0 border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-bg text-gray-700 dark:text-wiki-text text-xs rounded px-2 py-1
+                       focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active"></select>
+        <button type="button" id="btn-manage-chat-models" data-i18n-title="chat.manageModels" data-i18n-aria="chat.manageModels"
+                aria-label="Manage models"
+                class="shrink-0 text-gray-400 dark:text-wiki-text-muted hover:text-gray-700 dark:hover:text-wiki-text focus:outline-none focus:ring-2 focus:ring-blue-400 rounded p-1">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
       <form id="form-chat" class="flex items-end gap-2" onsubmit="return false;">
         <textarea id="chat-input" rows="1" data-i18n-ph="chat.placeholder"
                   placeholder="Ask anything about this repo…"
@@ -1211,6 +1224,32 @@
       <p data-i18n="chat.disclaimer" class="text-[11px] text-gray-400 dark:text-wiki-text-muted mt-1.5">
         Answers are generated from the index and may be incomplete. Verify against the source.
       </p>
+    </div>
+  </div>
+</div>
+
+<!-- Chat custom-model manager -->
+<div id="modal-chat-models" class="hidden fixed inset-0 z-[130] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+     role="dialog" aria-modal="true" aria-labelledby="chat-models-title">
+  <div class="w-full max-w-2xl mx-4 bg-white dark:bg-wiki-surface border border-gray-200 dark:border-wiki-border rounded-lg shadow-2xl flex flex-col"
+       style="height: min(80vh, 640px);">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-wiki-border">
+      <h3 id="chat-models-title" data-i18n="chat.manageModels" class="text-sm font-medium text-gray-900 dark:text-wiki-heading">Custom chat models</h3>
+      <button id="btn-close-chat-models" aria-label="Close"
+              class="text-gray-400 dark:text-wiki-text-muted hover:text-gray-700 dark:hover:text-wiki-text focus:outline-none focus:ring-2 focus:ring-blue-400 rounded p-1">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="px-4 py-3 overflow-y-auto flex-1">
+      <p data-i18n="chat.manageModelsHelp" class="text-xs text-gray-400 dark:text-wiki-text-muted mb-3">
+        OpenAI-compatible endpoints for chat only. Each base URL has one API key and serves one or more models. The rerank/index model in Settings is unaffected.
+      </p>
+      <div id="chat-endpoints-list" class="space-y-3"></div>
+      <button type="button" id="btn-add-chat-endpoint" data-i18n="chat.addEndpoint"
+              class="mt-3 text-xs px-3 py-1.5 border border-gray-200 dark:border-wiki-border text-gray-700 dark:text-wiki-text rounded
+                     hover:bg-gray-50 dark:hover:bg-wiki-bg focus:outline-none focus:ring-2 focus:ring-blue-400">
+        Add base URL
+      </button>
     </div>
   </div>
 </div>
@@ -1524,6 +1563,19 @@ const STR = {
                          zh: `助手通过 codebase-retrieval 和 file-retrieval 搜索索引来回答。` },
   'chat.placeholder':  { en: `Ask anything about this repo…`, vi: `Hỏi bất cứ điều gì về repo này…`, zh: `询问关于此仓库的任何问题…` },
   'chat.send':         { en: `Send`, vi: `Gửi`, zh: `发送` },
+  'chat.model':        { en: `Model`, vi: `Model`, zh: `模型` },
+  'chat.modelDefault': { en: `Default (Settings)`, vi: `Mặc định (Settings)`, zh: `默认（设置）` },
+  'chat.manageModels': { en: `Custom chat models`, vi: `Custom chat models`, zh: `自定义对话模型` },
+  'chat.manageModelsHelp': { en: `OpenAI-compatible endpoints for chat only. Each base URL has one API key and serves one or more models. The rerank/index model in Settings is unaffected.`,
+                         vi: `Endpoint OpenAI-compatible chỉ cho chat. Mỗi base URL có một API key và phục vụ một hoặc nhiều model. Model rerank/index trong Settings không bị ảnh hưởng.`,
+                         zh: `仅用于对话的 OpenAI 兼容 endpoint。每个 base URL 有一个 API key，服务一个或多个 model。设置中的 rerank/index 模型不受影响。` },
+  'chat.addEndpoint':  { en: `Add base URL`, vi: `Thêm base URL`, zh: `添加 base URL` },
+  'chat.endpointProvider': { en: `Provider`, vi: `Provider`, zh: `Provider` },
+  'chat.endpointBaseUrl': { en: `Base URL`, vi: `Base URL`, zh: `Base URL` },
+  'chat.endpointApiKey': { en: `API key`, vi: `API key`, zh: `API key` },
+  'chat.endpointModels': { en: `Models (one per line)`, vi: `Models (mỗi dòng một model)`, zh: `Models（每行一个）` },
+  'chat.endpointForceToolUse': { en: `Force tool use (tool_choice: required)`, vi: `Force tool use (tool_choice: required)`, zh: `强制 tool use（tool_choice: required）` },
+  'chat.removeEndpoint': { en: `Remove`, vi: `Xóa`, zh: `移除` },
   'chat.disclaimer':   { en: `Answers are generated from the index and may be incomplete. Verify against the source.`,
                          vi: `Câu trả lời được tạo từ index và có thể chưa đầy đủ. Hãy kiểm chứng với source.`,
                          zh: `回答基于索引生成，可能不完整。请对照源代码核实。` },
@@ -4943,10 +4995,97 @@ let chatRepo = null;
 let chatAbort = null;     // AbortController for the in-flight stream
 let chatBusy = false;
 let chatPrevBodyOverflow = '';  // body overflow saved while the dialog is open
+// The chat model selection, persisted across opens AND page reloads. null = the
+// Settings default; otherwise { base_url, model } naming a custom endpoint model.
+// Both fields are sent to the server (not an index) so it resolves the selection
+// even after the endpoint list is edited/reordered. Restored from localStorage
+// below; re-validated against the live endpoint list in renderChatModelSelect().
+const CHAT_MODEL_LS_KEY = 'chatSelectedModel';
+let chatSelectedModel = (() => {
+  try {
+    const raw = localStorage.getItem(CHAT_MODEL_LS_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    // Only accept the expected shape; anything else → default.
+    if (v && typeof v.model === 'string' && typeof v.base_url === 'string') return v;
+  } catch (_) { /* corrupt entry → default */ }
+  return null;
+})();
+
+/// Persist (or clear) the current chat model selection so it survives reloads.
+function persistChatSelectedModel() {
+  try {
+    if (chatSelectedModel) {
+      localStorage.setItem(CHAT_MODEL_LS_KEY, JSON.stringify(chatSelectedModel));
+    } else {
+      localStorage.removeItem(CHAT_MODEL_LS_KEY);
+    }
+  } catch (_) { /* storage unavailable → in-memory only */ }
+}
 
 function genConversationId() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
   return 'c-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+
+// ─── Chat custom-model picker ───────────────────────────────────────────────
+
+/// Flat list of pickable custom models across all configured endpoints, each as
+/// { base_url, model }. Empty until cfg loads. Mirrors the server's (base_url,
+/// model) resolution in build_chat_llm.
+function chatCustomModels() {
+  const eps = (cfg && cfg.llm && cfg.llm.chat_custom_endpoints) || [];
+  const out = [];
+  for (const ep of eps) {
+    const provider = (ep.provider || 'openai').trim();
+    const base = (ep.base_url || '').trim();
+    // openai needs a base_url; google ignores it (uses the official Gemini API).
+    if (provider !== 'google' && !base) continue;
+    // Wire identity: base_url is empty for google, set for openai — this is what
+    // sendChat() forwards and build_chat_llm matches on.
+    const wireBase = provider === 'google' ? '' : base;
+    for (const m of (ep.models || [])) {
+      const model = (m || '').trim();
+      if (model) out.push({ provider, base_url: wireBase, model });
+    }
+  }
+  return out;
+}
+
+/// Rebuild the composer dropdown: a Default option plus every custom model.
+/// Re-asserts chatSelectedModel if it still resolves, else falls back to default.
+function renderChatModelSelect() {
+  const sel = document.getElementById('chat-model-select');
+  if (!sel) return;
+  const models = chatCustomModels();
+  let html = '<option value="">' + escHtml(t('chat.modelDefault')) + '</option>';
+  for (const m of models) {
+    // value encodes base_url + model with a delimiter that cannot appear in a
+    // URL or model name unescaped; decoded back in the change handler. (google
+    // entries carry an empty base_url, so the value is `|<model>`.)
+    const val = encodeURIComponent(m.base_url) + '|' + encodeURIComponent(m.model);
+    // Label: google shows the provider, openai shows the base URL.
+    const where = m.provider === 'google' ? 'Google' : m.base_url;
+    html += '<option value="' + escHtml(val) + '">' + escHtml(m.model) + '  ·  ' + escHtml(where) + '</option>';
+  }
+  sel.innerHTML = html;
+
+  // Re-select the prior choice if it still exists; otherwise reset to default.
+  if (chatSelectedModel) {
+    const stillThere = models.some(m =>
+      m.base_url === chatSelectedModel.base_url && m.model === chatSelectedModel.model);
+    if (stillThere) {
+      sel.value = encodeURIComponent(chatSelectedModel.base_url) + '|' + encodeURIComponent(chatSelectedModel.model);
+    } else {
+      // The persisted model no longer exists (endpoint edited/removed) → reset
+      // to default and forget it so a reload doesn't keep trying to restore it.
+      chatSelectedModel = null;
+      persistChatSelectedModel();
+      sel.value = '';
+    }
+  } else {
+    sel.value = '';
+  }
 }
 
 function openChat() {
@@ -4959,6 +5098,7 @@ function openChat() {
   msgs.innerHTML = '';
   msgs.appendChild(buildChatEmptyState());
   document.getElementById('chat-input').value = '';
+  renderChatModelSelect();
   const modal = document.getElementById('modal-chat');
   // Capture the pre-lock overflow only on a true open (dialog currently hidden).
   // A re-entrant openChat (re-open / repo-switch while already open) must NOT
@@ -5059,7 +5199,7 @@ function appendAssistantTurn() {
   status.innerHTML = '<span class="inline-block w-3 h-3 rounded-full border-2 border-gray-300 dark:border-wiki-border border-t-blue-500 animate-spin"></span><span>' + escHtml(t('chat.thinking')) + '</span><span class="chat-elapsed font-mono tabular-nums text-gray-400 dark:text-wiki-text-muted">0.0s</span>';
 
   const answer = document.createElement('div');
-  answer.className = 'chat-answer chat-md max-w-[85%] rounded-lg px-3 py-2 text-sm break-words bg-gray-100 text-gray-900 dark:bg-wiki-surface dark:text-wiki-text hidden';
+  answer.className = 'chat-answer chat-md max-w-[85%] min-w-0 overflow-hidden rounded-lg px-3 py-2 text-sm break-words bg-gray-100 text-gray-900 dark:bg-wiki-surface dark:text-wiki-text hidden';
 
   row.appendChild(steps);
   row.appendChild(status);
@@ -5160,7 +5300,13 @@ async function sendChat() {
     const res = await fetch(`/api/repos/${repoId}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation_id: chatConversationId, message }),
+      body: JSON.stringify({
+        conversation_id: chatConversationId,
+        message,
+        // Custom-model selection (null → server uses the Settings default).
+        base_url: chatSelectedModel ? chatSelectedModel.base_url : null,
+        model: chatSelectedModel ? chatSelectedModel.model : null,
+      }),
       signal: chatAbort.signal,
     });
     if (!res.ok || !res.body) {
@@ -5268,12 +5414,142 @@ document.getElementById('chat-input').addEventListener('input', (e) => {
   e.target.style.height = 'auto';
   e.target.style.height = Math.min(e.target.scrollHeight, 128) + 'px';
 });
+// Model selection → update chatSelectedModel (decoded from the option value).
+document.getElementById('chat-model-select').addEventListener('change', (e) => {
+  const v = e.target.value;
+  if (!v) { chatSelectedModel = null; persistChatSelectedModel(); return; }
+  const sep = v.indexOf('|');
+  if (sep === -1) { chatSelectedModel = null; persistChatSelectedModel(); return; }
+  chatSelectedModel = {
+    base_url: decodeURIComponent(v.slice(0, sep)),
+    model: decodeURIComponent(v.slice(sep + 1)),
+  };
+  persistChatSelectedModel();
+});
 // ESC closes the dialog (and ends the conversation).
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !document.getElementById('modal-chat').classList.contains('hidden')) {
+  if (e.key !== 'Escape') return;
+  // The models manager sits above the chat dialog — close it first if open.
+  if (!document.getElementById('modal-chat-models').classList.contains('hidden')) {
+    closeChatModelsManager();
+    return;
+  }
+  if (!document.getElementById('modal-chat').classList.contains('hidden')) {
     closeChat();
   }
 });
+
+// ─── Chat custom-model manager (add/edit/remove endpoints) ──────────────────
+document.getElementById('btn-manage-chat-models').addEventListener('click', openChatModelsManager);
+document.getElementById('btn-close-chat-models').addEventListener('click', closeChatModelsManager);
+document.getElementById('btn-add-chat-endpoint').addEventListener('click', () => {
+  if (!cfg) return;
+  if (!cfg.llm.chat_custom_endpoints) cfg.llm.chat_custom_endpoints = [];
+  cfg.llm.chat_custom_endpoints.push({ provider: 'openai', base_url: '', api_key: '', models: [], force_tool_use: false });
+  renderChatEndpointsList();
+  saveDebounced();
+});
+
+function openChatModelsManager() {
+  if (!cfg) return;
+  if (!cfg.llm.chat_custom_endpoints) cfg.llm.chat_custom_endpoints = [];
+  renderChatEndpointsList();
+  document.getElementById('modal-chat-models').classList.remove('hidden');
+}
+
+function closeChatModelsManager() {
+  document.getElementById('modal-chat-models').classList.add('hidden');
+  // The endpoint list may have changed → rebuild the composer dropdown.
+  renderChatModelSelect();
+}
+
+/// Render one editable card per configured endpoint. Edits mutate cfg in place
+/// and persist via saveDebounced() (text) / saveNow() (structural), mirroring
+/// the rest of the settings UI.
+function renderChatEndpointsList() {
+  const list = document.getElementById('chat-endpoints-list');
+  if (!list) return;
+  const eps = cfg.llm.chat_custom_endpoints || [];
+  list.innerHTML = '';
+  eps.forEach((ep, idx) => {
+    const provider = (ep.provider || 'openai');
+    const isGoogle = provider === 'google';
+    const card = document.createElement('div');
+    card.className = 'border border-gray-200 dark:border-wiki-border rounded p-3 space-y-2';
+    card.innerHTML =
+      '<div class="flex items-center justify-between gap-2">' +
+        '<span class="text-[11px] font-medium text-gray-500 dark:text-wiki-text-muted">' + escHtml(t('chat.endpointProvider')) + '</span>' +
+        '<button type="button" data-act="remove" class="text-[11px] text-red-600 dark:text-red-400 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-400 rounded px-1">' + escHtml(t('chat.removeEndpoint')) + '</button>' +
+      '</div>' +
+      '<select data-field="provider" ' +
+        'class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface text-gray-900 dark:text-wiki-text rounded px-2 py-1.5 text-xs ' +
+        'focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active">' +
+        '<option value="openai"' + (isGoogle ? '' : ' selected') + '>OpenAI</option>' +
+        '<option value="google"' + (isGoogle ? ' selected' : '') + '>Google</option>' +
+      '</select>' +
+      // Base URL block — hidden for google (uses the official Gemini API).
+      '<div data-block="base_url"' + (isGoogle ? ' class="hidden"' : '') + '>' +
+        '<label class="block text-[11px] font-medium text-gray-500 dark:text-wiki-text-muted mb-1">' + escHtml(t('chat.endpointBaseUrl')) + '</label>' +
+        '<input data-field="base_url" type="text" placeholder="https://api.openai.com/v1" value="' + escHtml(ep.base_url || '') + '" ' +
+          'class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-bg text-gray-900 dark:text-wiki-text rounded px-2 py-1.5 text-xs font-mono ' +
+          'placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />' +
+      '</div>' +
+      '<label class="block text-[11px] font-medium text-gray-500 dark:text-wiki-text-muted">' + escHtml(t('chat.endpointApiKey')) + '</label>' +
+      '<input data-field="api_key" type="password" autocomplete="off" value="' + escHtml(ep.api_key || '') + '" ' +
+        'class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-bg text-gray-900 dark:text-wiki-text rounded px-2 py-1.5 text-xs font-mono ' +
+        'focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />' +
+      '<label class="block text-[11px] font-medium text-gray-500 dark:text-wiki-text-muted">' + escHtml(t('chat.endpointModels')) + '</label>' +
+      '<textarea data-field="models" rows="3" placeholder="' + (isGoogle ? 'gemini-3.1-flash-lite' : 'gpt-4o-mini') + '" ' +
+        'class="w-full resize-y border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-bg text-gray-900 dark:text-wiki-text rounded px-2 py-1.5 text-xs font-mono ' +
+        'placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active">' +
+        escHtml((ep.models || []).join('\n')) + '</textarea>' +
+      // Force-tool-use applies only to OpenAI (google.rs uses mode:ANY natively).
+      '<label data-block="force_tool_use" class="flex items-center gap-2 text-[11px] font-medium text-gray-500 dark:text-wiki-text-muted cursor-pointer' + (isGoogle ? ' hidden' : '') + '">' +
+        '<input data-field="force_tool_use" type="checkbox" ' + (ep.force_tool_use ? 'checked ' : '') +
+        'class="h-4 w-4 rounded border-gray-300 dark:border-wiki-border text-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400" />' +
+        escHtml(t('chat.endpointForceToolUse')) +
+      '</label>';
+
+    card.querySelector('[data-act="remove"]').addEventListener('click', () => {
+      cfg.llm.chat_custom_endpoints.splice(idx, 1);
+      renderChatEndpointsList();
+      saveNow();
+    });
+    // NOTE: handlers must re-fetch the endpoint via cfg.llm.chat_custom_endpoints[idx]
+    // at event time — NEVER capture `ep`. saveNow() replaces `cfg` with the
+    // server's response (`cfg = await res.json()`), so a captured `ep` becomes a
+    // detached orphan after the first save and later edits would be lost.
+    card.querySelector('[data-field="provider"]').addEventListener('change', (e) => {
+      const cur = cfg.llm.chat_custom_endpoints[idx];
+      if (cur) {
+        cur.provider = e.target.value;
+        // Re-render so the base_url / force-tool-use blocks show/hide correctly.
+        renderChatEndpointsList();
+        saveNow();
+      }
+    });
+    card.querySelector('[data-field="base_url"]').addEventListener('input', (e) => {
+      const cur = cfg.llm.chat_custom_endpoints[idx];
+      if (cur) { cur.base_url = e.target.value; saveDebounced(); }
+    });
+    card.querySelector('[data-field="api_key"]').addEventListener('input', (e) => {
+      const cur = cfg.llm.chat_custom_endpoints[idx];
+      if (cur) { cur.api_key = e.target.value; saveDebounced(); }
+    });
+    card.querySelector('[data-field="models"]').addEventListener('input', (e) => {
+      const cur = cfg.llm.chat_custom_endpoints[idx];
+      if (cur) {
+        cur.models = e.target.value.split('\n').map(s => s.trim()).filter(Boolean);
+        saveDebounced();
+      }
+    });
+    card.querySelector('[data-field="force_tool_use"]').addEventListener('change', (e) => {
+      const cur = cfg.llm.chat_custom_endpoints[idx];
+      if (cur) { cur.force_tool_use = e.target.checked; saveNow(); }
+    });
+    list.appendChild(card);
+  });
+}
 </script>
 </body>
 </html>

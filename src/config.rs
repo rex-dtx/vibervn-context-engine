@@ -10,14 +10,14 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 
 /// Bump this when a new migration is appended to MIGRATIONS.
-pub const CURRENT_VERSION: u32 = 9;
+pub const CURRENT_VERSION: u32 = 10;
 
 /// Migration function type: transforms a JSON Value from version N to version N+1.
 pub type MigrationFn = fn(Value) -> Result<Value, ConfigError>;
 
 /// Ordered list of migration functions. Each entry migrates from version N to N+1,
 /// where N is the index into this slice (0-based, so index 0 = v1→v2, etc.).
-pub const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7, migrate_v7_to_v8, migrate_v8_to_v9];
+pub const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7, migrate_v7_to_v8, migrate_v8_to_v9, migrate_v9_to_v10];
 
 /// v1→v2: introduce `data_dir` (Option<PathBuf>). The body is a no-op stamp —
 /// `serde(default)` already handles missing fields on deserialize, but we
@@ -122,6 +122,23 @@ fn migrate_v7_to_v8(mut value: Value) -> Result<Value, ConfigError> {
 fn migrate_v8_to_v9(mut value: Value) -> Result<Value, ConfigError> {
     if let Value::Object(ref mut obj) = value {
         obj.entry("purchased_plans".to_string())
+            .or_insert_with(|| Value::Array(vec![]));
+    }
+    Ok(value)
+}
+
+/// v9→v10: introduce `llm.chat_custom_endpoints` (Vec<ChatCustomEndpoint>).
+/// Defaults to an empty array. These are extra OpenAI-compatible endpoints the
+/// repo-chat model picker can choose from, independent of the rerank/index model
+/// in `llm` proper — selecting one overrides only the chat client for that turn.
+/// `serde(default)` already covers a missing field on deserialize; we stamp an
+/// explicit empty array + bump the file's `version` so an older binary refuses
+/// the file (VersionTooNew) instead of dropping the field on next save.
+fn migrate_v9_to_v10(mut value: Value) -> Result<Value, ConfigError> {
+    if let Value::Object(ref mut obj) = value
+        && let Some(Value::Object(llm)) = obj.get_mut("llm")
+    {
+        llm.entry("chat_custom_endpoints".to_string())
             .or_insert_with(|| Value::Array(vec![]));
     }
     Ok(value)
@@ -247,6 +264,51 @@ pub struct LlmConfig {
     /// forced tool use (OpenRouter, vLLM, Together, etc.). Defaults to false.
     #[serde(default)]
     pub openai_force_tool_use: bool,
+    /// Extra OpenAI-compatible endpoints the repo-chat model picker may select,
+    /// independent of the rerank/index model above. Each entry groups one base
+    /// URL + its API key + the model names it serves. Selecting one in the chat
+    /// dialog overrides ONLY that chat turn's client (provider forced to
+    /// `openai`, that base URL + key + chosen model); the rerank/index path is
+    /// untouched. Empty by default. See [`ChatCustomEndpoint`].
+    #[serde(default)]
+    pub chat_custom_endpoints: Vec<ChatCustomEndpoint>,
+}
+
+/// One endpoint group offered to the repo-chat model picker, independent of the
+/// rerank/index model. Carries its own `provider`: `"openai"` goes through the
+/// OpenAI-compatible path (`base_url` + `llm::openai::chat_url`); `"google"`
+/// goes through `google.rs` on the official Gemini API and IGNORES `base_url`
+/// (the UI hides the base URL input for google). One API key per group, shared
+/// by every model it lists.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatCustomEndpoint {
+    /// Provider for this group: `"openai"` (OpenAI-compatible, uses `base_url`)
+    /// or `"google"` (official Gemini API, `base_url` ignored). Defaults to
+    /// `"openai"` so endpoints written before this field load as OpenAI.
+    #[serde(default = "default_chat_endpoint_provider")]
+    pub provider: String,
+    /// OpenAI-compatible base URL (only meaningful when `provider == "openai"`).
+    /// Accepts the base form (`…/v1`) or the full `…/v1/chat/completions`;
+    /// normalization is centralized in `llm::openai::chat_url`. Empty/ignored
+    /// for `provider == "google"`.
+    #[serde(default)]
+    pub base_url: String,
+    /// API key sent to this endpoint, shared by all of its `models`.
+    #[serde(default)]
+    pub api_key: String,
+    /// Model names this endpoint serves; each becomes a pickable chat model.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Send `tool_choice: "required"` to this endpoint (mirrors
+    /// [`LlmConfig::openai_force_tool_use`]). Honored only for `openai`; some
+    /// OpenAI-compatible servers reject `required`, so leave false for those.
+    /// Defaults to false.
+    #[serde(default)]
+    pub force_tool_use: bool,
+}
+
+fn default_chat_endpoint_provider() -> String {
+    "openai".to_owned()
 }
 
 impl Default for LlmConfig {
@@ -262,6 +324,7 @@ impl Default for LlmConfig {
             agentic_rag_max_chunk_chars: default_agentic_rag_max_chunk_chars(),
             openai_base_url: None,
             openai_force_tool_use: false,
+            chat_custom_endpoints: Vec::new(),
         }
     }
 }
@@ -1102,6 +1165,111 @@ mod tests {
             "openai_base_url must round-trip through write+load"
         );
         assert_eq!(loaded.version, CURRENT_VERSION);
+    }
+
+    /// Backward-compat for `chat_custom_endpoints`: an `llm` block predating the
+    /// field deserializes cleanly with an empty list (additive `Vec` + serde
+    /// default). Mirrors `test_llm_config_deserializes_without_openai_base_url`.
+    #[test]
+    fn test_llm_config_deserializes_without_chat_custom_endpoints() {
+        let json = r#"{"provider":"google","rerank_model":"gemini-3.1-flash-lite","api_keys":["k"]}"#;
+        let cfg: LlmConfig = serde_json::from_str(json).expect("deserialize old llm block");
+        assert!(
+            cfg.chat_custom_endpoints.is_empty(),
+            "chat_custom_endpoints must default to empty on old files"
+        );
+    }
+
+    /// Backward-compat for `ChatCustomEndpoint.provider`: an endpoint written
+    /// before the field was added (only base_url/api_key/models) deserializes
+    /// with provider defaulted to "openai" — preserving the original behavior.
+    #[test]
+    fn test_chat_endpoint_defaults_provider_to_openai() {
+        let json = r#"{"base_url":"http://localhost:11434/v1","api_key":"k","models":["m"]}"#;
+        let ep: ChatCustomEndpoint = serde_json::from_str(json).expect("deserialize old endpoint");
+        assert_eq!(ep.provider, "openai", "provider must default to openai on old endpoints");
+    }
+
+    /// Round-trip: an explicit `chat_custom_endpoints` list survives serialize →
+    /// atomic write → migration-aware reload via the real persistence path.
+    #[test]
+    fn test_llm_config_round_trips_chat_custom_endpoints() {
+        let home = TempDir::new().expect("tempdir");
+        let path = config_path(home.path());
+        fs::create_dir_all(path.parent().expect("has parent")).expect("create dirs");
+
+        let s = Settings {
+            llm: LlmConfig {
+                provider: "google".to_owned(),
+                rerank_model: "gemini-3.1-flash-lite".to_owned(),
+                api_keys: vec!["k".to_owned()],
+                chat_custom_endpoints: vec![
+                    ChatCustomEndpoint {
+                        provider: "openai".to_owned(),
+                        base_url: "http://localhost:11434/v1".to_owned(),
+                        api_key: "sk-local".to_owned(),
+                        models: vec!["qwen2.5-coder".to_owned(), "llama3.1".to_owned()],
+                        force_tool_use: true,
+                    },
+                    ChatCustomEndpoint {
+                        provider: "google".to_owned(),
+                        base_url: String::new(),
+                        api_key: "g-key".to_owned(),
+                        models: vec!["gemini-3.1-flash-lite".to_owned()],
+                        force_tool_use: false,
+                    },
+                ],
+                ..LlmConfig::default()
+            },
+            ..Settings::default()
+        };
+        write_settings_atomic(&path, &s).expect("write");
+
+        let loaded = ensure_dir_and_load(home.path()).expect("load");
+        assert_eq!(loaded.llm.chat_custom_endpoints.len(), 2);
+        let ep = &loaded.llm.chat_custom_endpoints[0];
+        assert_eq!(ep.provider, "openai");
+        assert_eq!(ep.base_url, "http://localhost:11434/v1");
+        assert_eq!(ep.api_key, "sk-local");
+        assert_eq!(ep.models, vec!["qwen2.5-coder".to_owned(), "llama3.1".to_owned()]);
+        assert!(ep.force_tool_use);
+        let g = &loaded.llm.chat_custom_endpoints[1];
+        assert_eq!(g.provider, "google");
+        assert!(g.base_url.is_empty());
+        assert_eq!(g.api_key, "g-key");
+        assert_eq!(g.models, vec!["gemini-3.1-flash-lite".to_owned()]);
+        assert_eq!(loaded.version, CURRENT_VERSION);
+    }
+
+    /// v9→v10 migration: an existing v9 file gains `llm.chat_custom_endpoints`
+    /// stamped as an empty array, and its version is bumped to CURRENT_VERSION.
+    #[test]
+    fn test_v9_to_v10_migration_stamps_empty_chat_custom_endpoints() {
+        let home = TempDir::new().expect("tempdir");
+        let path = config_path(home.path());
+        fs::create_dir_all(path.parent().expect("has parent")).expect("create dirs");
+
+        let v9 = r#"{
+            "version": 9,
+            "repos": [],
+            "embedding": {"provider":"voyage","model":"voyage-4-lite","api_keys":[],"embed_concurrency":16,"voyage_base_url":null},
+            "llm": {"provider":"google","rerank_model":"gemini-3.1-flash-lite","api_keys":[]},
+            "data_dir": null,
+            "embeddings_dir": null,
+            "enabled_mcp_tools": ["codebase-retrieval","file-retrieval"],
+            "custom_extensions": [],
+            "index_ignore_filenames": ["CLAUDE.md","AGENTS.md"],
+            "repo_generations": {},
+            "purchased_plans": []
+        }"#;
+        fs::write(&path, v9).expect("write v9 file");
+
+        let loaded = ensure_dir_and_load(home.path()).expect("load + migrate");
+        assert_eq!(loaded.version, CURRENT_VERSION);
+        assert!(
+            loaded.llm.chat_custom_endpoints.is_empty(),
+            "chat_custom_endpoints must be stamped empty by the v9→v10 migration"
+        );
     }
 
     #[test]

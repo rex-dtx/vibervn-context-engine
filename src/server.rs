@@ -1258,6 +1258,76 @@ async fn get_index_events(
 struct ChatRequest {
     conversation_id: String,
     message: String,
+    /// Optional custom-model selection. When both are present and resolve to a
+    /// configured `llm.chat_custom_endpoints` entry, the chat turn uses that
+    /// OpenAI-compatible endpoint instead of the Settings rerank/index model.
+    /// Absent / blank / unrecognized → the default `settings.llm` client.
+    /// Both are sent (not an index) so the selection survives endpoint edits.
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// Build the chat `LlmClient` for a request. When `base_url` + `model` name a
+/// configured custom endpoint that serves that model, return a client pinned to
+/// it. The endpoint's own `provider` decides the path: `"google"` goes through
+/// the official Gemini API (base URL ignored — matched by `(provider, model)`
+/// with an empty request base_url); `"openai"` uses the OpenAI-compatible path
+/// with its base URL (matched by `(base_url, model)`). Otherwise fall back to
+/// the default `settings.llm` client. The rerank/index path is never affected.
+fn build_chat_llm(
+    settings: &crate::config::Settings,
+    base_url: Option<&str>,
+    model: Option<&str>,
+) -> Option<crate::llm::LlmClient> {
+    if let Some(model) = model {
+        let model = model.trim();
+        // The request base_url is empty for google endpoints, set for openai.
+        let req_base = base_url.map(str::trim).unwrap_or("");
+        if !model.is_empty() {
+            // Match on the same identity the UI sends: google → base_url is
+            // empty, so compare provider+model; openai → compare base_url+model.
+            if let Some(ep) = settings.llm.chat_custom_endpoints.iter().find(|e| {
+                let is_google = e.provider == "google";
+                let model_ok = e.models.iter().any(|m| m.trim() == model);
+                if is_google {
+                    // google: request carries no base_url; match by provider+model.
+                    req_base.is_empty() && model_ok
+                } else {
+                    // openai: match by exact base_url + model.
+                    e.base_url.trim() == req_base && !req_base.is_empty() && model_ok
+                }
+            }) {
+                if ep.api_key.trim().is_empty() {
+                    return None; // configured but keyless — caller surfaces the error
+                }
+                // Reuse the rerank LlmConfig shape, overriding only what the
+                // custom chat endpoint defines, per its provider.
+                let cfg = if ep.provider == "google" {
+                    crate::config::LlmConfig {
+                        provider: "google".to_owned(),
+                        rerank_model: model.to_owned(),
+                        api_keys: vec![ep.api_key.clone()],
+                        // google.rs ignores base_url; leave it None.
+                        openai_base_url: None,
+                        ..settings.llm.clone()
+                    }
+                } else {
+                    crate::config::LlmConfig {
+                        provider: "openai".to_owned(),
+                        rerank_model: model.to_owned(),
+                        api_keys: vec![ep.api_key.clone()],
+                        openai_base_url: Some(ep.base_url.clone()),
+                        openai_force_tool_use: ep.force_tool_use,
+                        ..settings.llm.clone()
+                    }
+                };
+                return crate::llm::LlmClient::new(&cfg);
+            }
+        }
+    }
+    crate::llm::LlmClient::new(&settings.llm)
 }
 
 /// POST /api/repos/:repo_id/chat — stream an answer for one chat message.
@@ -1289,9 +1359,10 @@ async fn post_repo_chat(
         return chat_sse_response(rx);
     }
 
-    // Build the LLM client from settings.llm. Missing keys → concise error frame.
+    // Build the LLM client from settings.llm, or from a selected custom chat
+    // endpoint when the request names one. Missing/keyless → concise error frame.
     let settings = state.settings.read().await.clone();
-    let llm = match crate::llm::LlmClient::new(&settings.llm) {
+    let llm = match build_chat_llm(&settings, req.base_url.as_deref(), req.model.as_deref()) {
         Some(c) => c,
         None => {
             let _ = tx.send(crate::chat::ChatEvent::Error {
