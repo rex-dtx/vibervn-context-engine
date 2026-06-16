@@ -4,6 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Context Engine Settings</title>
+  <!-- Serif heading webfont with full Vietnamese (precomposed) + Latin coverage.
+       Locally-installed Linux Libertine reports Vietnamese glyphs (ề/ệ/…) but renders
+       them decomposed, so the browser never falls through and tone marks float off
+       (e.g. "về" -> "vê`"). Pulling a known-complete serif first fixes this; the local
+       stack remains as the offline fallback. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,400;0,600;0,700;1,400&display=swap&subset=latin,vietnamese" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -31,7 +39,10 @@
     }
   </script>
   <style>
-    .font-wiki { font-family: 'Linux Libertine', 'Georgia', 'Times', serif; }
+    /* 'Noto Serif' leads because it ships precomposed Vietnamese glyphs; the rest are
+       offline fallbacks. font-synthesis:none stops the browser from faking a missing
+       glyph by stacking a base letter + a combining mark (the detached-tone-mark bug). */
+    .font-wiki { font-family: 'Noto Serif', 'Linux Libertine', 'Georgia', 'Times', serif; font-synthesis: none; }
     /* Suppress focus ring on mouse/touch interaction; keep it for keyboard nav (a11y). */
     *:focus:not(:focus-visible) {
       box-shadow: none !important;
