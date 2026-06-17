@@ -1188,7 +1188,7 @@
         <svg class="w-10 h-10 text-gray-300 dark:text-wiki-text-muted" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         <p data-i18n="chat.emptyTitle" class="font-wiki text-lg text-gray-700 dark:text-wiki-heading">Ask about this repository</p>
         <p data-i18n="chat.emptyHint" class="text-xs text-gray-400 dark:text-wiki-text-muted max-w-sm">
-          The assistant searches the index with codebase-retrieval and file-retrieval to answer.
+          The assistant uses codebase-retrieval, file-retrieval, grep, and read to find code and answer.
         </p>
       </div>
     </div>
@@ -1558,9 +1558,9 @@ const STR = {
   'chat.title':        { en: `Chat`, vi: `Chat`, zh: `对话` },
   'chat.newChat':      { en: `New chat`, vi: `Chat mới`, zh: `新对话` },
   'chat.emptyTitle':   { en: `Ask about this repository`, vi: `Hỏi về repo này`, zh: `询问此仓库` },
-  'chat.emptyHint':    { en: `The assistant searches the index with codebase-retrieval and file-retrieval to answer.`,
-                         vi: `Trợ lý dùng codebase-retrieval và file-retrieval để tìm trong index và trả lời.`,
-                         zh: `助手通过 codebase-retrieval 和 file-retrieval 搜索索引来回答。` },
+  'chat.emptyHint':    { en: `The assistant uses codebase-retrieval, file-retrieval, grep, and read to find code and answer.`,
+                         vi: `Trợ lý dùng codebase-retrieval, file-retrieval, grep và read để tìm code và trả lời.`,
+                         zh: `助手通过 codebase-retrieval、file-retrieval、grep 和 read 查找代码并回答。` },
   'chat.placeholder':  { en: `Ask anything about this repo…`, vi: `Hỏi bất cứ điều gì về repo này…`, zh: `询问关于此仓库的任何问题…` },
   'chat.send':         { en: `Send`, vi: `Gửi`, zh: `发送` },
   'chat.model':        { en: `Model`, vi: `Model`, zh: `模型` },
@@ -1582,6 +1582,8 @@ const STR = {
   'chat.thinking':     { en: `Thinking…`, vi: `Đang suy nghĩ…`, zh: `思考中…` },
   'chat.toolCodebase': { en: `Searching codebase`, vi: `Đang tìm trong codebase`, zh: `正在搜索代码库` },
   'chat.toolFile':     { en: `Reading file`, vi: `Đang đọc file`, zh: `正在读取文件` },
+  'chat.toolGrep':     { en: `Searching text (grep)`, vi: `Đang tìm text (grep)`, zh: `正在搜索文本 (grep)` },
+  'chat.toolRead':     { en: `Reading file (read)`, vi: `Đang đọc file (read)`, zh: `正在读取文件 (read)` },
   'chat.toolFailed':   { en: `failed`, vi: `thất bại`, zh: `失败` },
   'chat.connErr':      { en: `Connection lost. Please try again.`, vi: `Mất kết nối. Vui lòng thử lại.`, zh: `连接中断，请重试。` },
   'graph.heading':     { en: `Call graph`, vi: `Call graph`, zh: `调用图` },
@@ -2283,6 +2285,11 @@ function mdInline(text) {
     return ' ' + (codes.length - 1) + ' ';
   });
   s = escHtml(s);
+  // Restore <br> tags the model emits for line breaks inside table cells (and
+  // paragraphs) — escHtml turned them into &lt;br/&gt; literals. Only the void
+  // <br> tag is unescaped; it has no attributes and no XSS surface, so this
+  // doesn't reopen the hole escHtml closes.
+  s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
     // escHtml has already run, so '&' in the captured url is '&amp;' etc.
     // Only allow safe schemes — block javascript:/data:/vbscript: which escaping
@@ -5227,6 +5234,8 @@ function stopChatTimer(turn) {
 function toolLabel(name) {
   if (name === 'codebase-retrieval') return t('chat.toolCodebase');
   if (name === 'file-retrieval') return t('chat.toolFile');
+  if (name === 'grep') return t('chat.toolGrep');
+  if (name === 'read') return t('chat.toolRead');
   return name;
 }
 

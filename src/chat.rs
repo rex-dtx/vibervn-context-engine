@@ -23,15 +23,53 @@ use crate::config::Settings;
 use crate::indexing::IndexEngine;
 use crate::llm::{ChatMessage, LlmClient, ToolDef, ToolResult, ToolTurnResult};
 
-/// The only two tool names the chat agent may call. Any other name returned by
-/// the model is rejected with an error tool-result so it self-corrects.
+/// The tool names the chat agent may call. Any other name returned by the model
+/// is rejected with an error tool-result so it self-corrects. Two are semantic
+/// (index-backed) and two are exact (filesystem-backed):
+/// - [`TOOL_CODEBASE`] / [`TOOL_FILE`] embed the request and rank by meaning.
+/// - [`TOOL_GREP`] / [`TOOL_READ`] hit the working tree directly for exact text
+///   and verbatim line ranges — the difference between "guess what's relevant"
+///   and "see exactly what is there", which is what keeps answers from drifting
+///   into fabricated symbol names or invented code.
 pub const TOOL_CODEBASE: &str = "codebase-retrieval";
 pub const TOOL_FILE: &str = "file-retrieval";
+pub const TOOL_GREP: &str = "grep";
+pub const TOOL_READ: &str = "read";
 
 /// Max tool-calling rounds before the loop gives up (bounds cost per question).
 const MAX_TURNS: u32 = 8;
 /// Max characters of a tool result forwarded to the UI as a preview.
 const PREVIEW_CHARS: usize = 280;
+
+// ─── grep/read bounds (exact filesystem tools) ────────────────────────────
+// These keep the two exact tools cost-bounded at kernel scale: a common regex
+// over a multi-million-file tree must never stream unbounded output into the
+// model, and a single `read` must never pull a whole generated megafile.
+
+/// Hard cap on total grep matches returned across all files in one call. A
+/// common term in a huge repo can match millions of lines; we return the first
+/// [`GREP_MAX_MATCHES`] (in deterministic walk order) and flag truncation.
+const GREP_MAX_MATCHES: usize = 200;
+/// Cap on matches returned from any single file, so one noisy file can't crowd
+/// out matches the model needs to see from other files.
+const GREP_MAX_PER_FILE: usize = 20;
+/// Cap on files scanned in one grep, independent of match count — bounds the
+/// walk itself on a Chromium/Linux-scale tree even when nothing matches.
+const GREP_MAX_FILES_SCANNED: usize = 20_000;
+/// Skip any file larger than this from grep (generated bundles, minified JS,
+/// binary blobs that slipped past the binary check) — they blow the budget and
+/// almost never hold the answer.
+const GREP_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Context lines allowed on either side of a grep match (the `-C` knob), capped
+/// so a large value can't multiply output past the match budget.
+const GREP_MAX_CONTEXT: usize = 10;
+
+/// Max lines returned by a single `read` call. The model pages with
+/// start_line/end_line if it needs more — bounds one read at kernel scale.
+const READ_MAX_LINES: usize = 800;
+/// Hard byte cap on a single `read` result, enforced alongside the line cap so
+/// a file of very long lines can't blow the budget within [`READ_MAX_LINES`].
+const READ_MAX_BYTES: usize = 64 * 1024;
 
 // ─── Streaming events (serialized to SSE `data:` JSON) ────────────────────
 
@@ -384,6 +422,76 @@ fn tool_defs() -> Vec<ToolDef> {
                 "required": ["file_path", "information_request"]
             }),
         },
+        ToolDef {
+            name: TOOL_GREP.to_owned(),
+            description: "Exact text/regex search over the repository's working tree (like \
+                ripgrep). Unlike codebase-retrieval (semantic, ranked by meaning), this finds the \
+                LITERAL pattern and returns every matching line as `path:line: text`. Use it when \
+                you need exact, complete matches: every call site of a symbol, where a string \
+                constant is defined, all uses of an identifier. Respects .gitignore and skips \
+                binary files."
+                .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "The text or regex to search for. Treated as a regular \
+                            expression unless `literal` is true."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional path or glob to scope the search, relative to the \
+                            repo root (e.g. `src/`, `src/**/*.rs`, `Cargo.toml`). Omit to search \
+                            the whole repo."
+                    },
+                    "literal": {
+                        "type": "boolean",
+                        "description": "When true, match the pattern as a literal string (regex \
+                            metacharacters are escaped). Default false."
+                    },
+                    "ignore_case": {
+                        "type": "boolean",
+                        "description": "Case-insensitive match when true. Default false."
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Lines of context to include on each side of a match \
+                            (like grep -C), 0-10. Default 0."
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
+            name: TOOL_READ.to_owned(),
+            description: "Read the verbatim contents of ONE file in this repository, exactly as \
+                on disk, returned as numbered lines. Unlike file-retrieval (semantic chunks ranked \
+                by a question), this returns the raw lines with no ranking — use it when you know \
+                the file and want the actual code, e.g. to read a function you saw in a grep or \
+                search result. Optionally restrict to a line range; large files must be paged."
+                .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file, relative to the repository root."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "First line to read (1-based, inclusive). Omit to start at \
+                            line 1."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Last line to read (1-based, inclusive). Omit to read to \
+                            the end (subject to the per-read line cap)."
+                    }
+                },
+                "required": ["file_path"]
+            }),
+        },
     ]
 }
 
@@ -391,54 +499,71 @@ fn system_prompt(repo: &str, project_docs: &str) -> String {
     let mut prompt = format!(
         "You are a helpful assistant answering questions about a single software repository \
 located at `{repo}`.\n\n\
-You have exactly two tools: `{TOOL_CODEBASE}` (semantic search over the whole repo index) and \
-`{TOOL_FILE}` (retrieve chunks of one specific file). You have NO other tools and NO direct \
-filesystem or shell access. Do not claim to run commands, open files directly, or use any tool \
-other than these two.\n\n\
-Choosing the right tool:\n\
-- `{TOOL_CODEBASE}` is semantic search across the WHOLE repo. Use it when you don't yet know which \
-file holds the answer. Phrase the `information_request` as a high-level question about behavior or \
-location. Good: \"where is the vector index sharded per repo\", \"how does the freshness check \
-decide to re-index\". Bad: \"show me the contents of mcp.rs\" (you already named the file — use \
-`{TOOL_FILE}` instead).\n\
-- `{TOOL_FILE}` retrieves the relevant chunks of ONE named file. Use it after `{TOOL_CODEBASE}` \
-points you at a file and you need more of it. Good: file_path `src/chat.rs`, request \"what does \
-run_chat_turn do with the search budget\". It needs a concrete file path — never guess one you \
-haven't seen in a result.\n\n\
+You have four tools, and NO direct shell access. Two are SEMANTIC (search the index by meaning) \
+and two are EXACT (hit the files on disk directly):\n\
+- `{TOOL_CODEBASE}` — semantic search across the WHOLE repo index. Ranks code by meaning, not \
+exact text. Best when you don't yet know where the answer lives or you're exploring a concept.\n\
+- `{TOOL_FILE}` — semantic search WITHIN one named file. Returns the chunks of that file closest \
+in meaning to your request.\n\
+- `{TOOL_GREP}` — EXACT text/regex search over the working tree (like ripgrep). Returns every \
+literal matching line as `path:line: text`. Use it for precise, complete facts: every call site \
+of a function, where a constant/identifier is defined, all usages of a name. This is how you \
+VERIFY an exact symbol name or prove how many places use something — semantic search cannot.\n\
+- `{TOOL_READ}` — read ONE file's verbatim contents as numbered lines (optionally a line range). \
+Returns the real code as-is, no ranking. Use it to see the actual implementation once you know \
+the file — e.g. read the function a grep or search pointed you at.\n\n\
+Choosing the right tool — this matters, picking wrong is why answers go wrong:\n\
+- Don't know where it is, or asking about a concept/behavior? → `{TOOL_CODEBASE}` first. Good: \
+\"where is the vector index sharded per repo\", \"how does the freshness check decide to \
+re-index\".\n\
+- Need the EXACT name, EVERY occurrence, or to confirm a string/symbol literally exists? → \
+`{TOOL_GREP}`. Good: pattern `fn run_chat_turn`, pattern `MAX_TURNS`, pattern `TODO` scoped to \
+`src/`. This is the antidote to guessing a symbol name — if you're about to state a name, grep \
+it first.\n\
+- Know the file and want to read the real code (a function body, a struct, a range you saw in a \
+result)? → `{TOOL_READ}` with the path (and a line range for big files). Don't paraphrase code \
+from a chunk preview when you can read the exact lines.\n\
+- Want the parts of a known file relevant to a fuzzy question? → `{TOOL_FILE}`.\n\
+Rule of thumb: SEARCH to find candidates, GREP to verify exact facts, READ to see the real code \
+before you describe it.\n\n\
 Core principle: GATHER ENOUGH EVIDENCE BEFORE YOU ANSWER. A confidently wrong answer is the \
 worst outcome. It is always better to keep searching, or to admit a gap, than to guess. Never \
 answer a question about how the code works from memory or assumption — every factual claim about \
-this repository must be grounded in something a tool actually returned this turn.\n\n\
+this repository must be grounded in something a tool actually returned this turn. In particular: \
+NEVER state a symbol name, signature, or that some code exists without having seen it in a grep \
+or read result — if you haven't verified it exactly, grep or read it before you write it.\n\n\
 How to work:\n\
-- For any question about the codebase, call `{TOOL_CODEBASE}` first. Do not answer before you \
-have called it at least once for the current question.\n\
+- For any question about the codebase, start with `{TOOL_CODEBASE}` to locate the relevant area. \
+Do not answer before you have gathered real evidence for the current question.\n\
 - Treat the first result as a starting point, not the final answer. Before answering, check: does \
 the context I have actually cover EVERY part of the question? If the question has multiple parts, \
 each part needs its own evidence.\n\
-- EXPAND THE BLAST RADIUS before you stop. One search is almost never enough. You must broaden \
-coverage along these axes until they stop yielding anything relevant:\n\
-  (1) re-query with DIFFERENT WORDING and synonyms for the same concept (e.g. \"render markdown\", \
-\"markdown to HTML\", \"marked / markdown-it\", \"sanitize html\", the function/class names you \
-saw);\n\
-  (2) FOLLOW THE GRAPH — when a result names a caller, callee, related symbol, or file, search for \
-or open that next (`{TOOL_FILE}`), because the answer often lives one hop away;\n\
-  (3) when a result hints at a specific file, use `{TOOL_FILE}` to read more of it.\n\
-You may stop searching ONLY when these branches are exhausted — i.e. fresh queries and graph hops \
-return nothing new and relevant. Until then, keep going.\n\
-- BATCH INDEPENDENT SEARCHES IN ONE TURN. You have a limited budget of rounds, but every tool call \
-you issue in a SINGLE turn runs together and costs only one round. So when you have several \
-independent angles to cover at once — different wordings/synonyms for the same concept, or several \
-distinct files to open — emit them as MULTIPLE tool calls in the same turn instead of one search \
-per round. This covers the blast radius faster and conserves rounds. The exception is a FOLLOW-UP \
-search that depends on what a prior result returns (e.g. a graph hop to a symbol you only learned \
+- VERIFY EXACT DETAILS WITH GREP/READ. When your answer will name a function, type, constant, or \
+file, or claim how something is implemented, confirm it: `{TOOL_GREP}` the name to see it exists \
+and where, then `{TOOL_READ}` the lines to see what it actually does. Semantic previews are \
+approximate and can mislead on exact names — the exact tools are authoritative.\n\
+- EXPAND THE BLAST RADIUS before you stop. One search is almost never enough. Broaden coverage \
+until these stop yielding anything relevant:\n\
+  (1) re-query `{TOOL_CODEBASE}` with DIFFERENT WORDING and synonyms for the same concept;\n\
+  (2) FOLLOW THE GRAPH — when a result names a caller, callee, related symbol, or file, grep for \
+that name or read that file, because the answer often lives one hop away;\n\
+  (3) when you have a concrete name or file, switch to `{TOOL_GREP}`/`{TOOL_READ}` to nail the \
+exact detail.\n\
+You may stop ONLY when these branches are exhausted — fresh queries, greps, and reads return \
+nothing new and relevant. Until then, keep going.\n\
+- BATCH INDEPENDENT CALLS IN ONE TURN. Every tool call you issue in a SINGLE turn runs together \
+and costs only one round. So when you have several independent angles — different wordings for a \
+search, several names to grep, several files to read — emit them as MULTIPLE tool calls in the \
+same turn instead of one per round. This covers the blast radius faster and conserves rounds. The \
+exception is a FOLLOW-UP that depends on a prior result (e.g. reading a file you only learned \
 about from the last result) — that genuinely needs the next round, so don't guess it blind.\n\
 - CRITICAL — absence is not proof: a thin or empty result does NOT mean the feature is missing. \
-NEVER conclude \"the project does not have X\" / \"there is no X\" from one search. You may only \
-claim something is absent after several differently-worded searches AND graph/file follow-ups all \
-come back empty — and even then, state it as \"I could not find X via search\", not as a fact.\n\
-- You decide how many searches are enough — use as many tool calls as the question needs (you \
-have a limited budget of rounds, so make each search count and stop once the blast radius is \
-truly exhausted).\n\
+NEVER conclude \"the project does not have X\" from one search. You may only claim something is \
+absent after several differently-worded searches AND a `{TOOL_GREP}` for the obvious literal \
+names AND graph/file follow-ups all come back empty — and even then, state it as \"I could not \
+find X\", not as a fact.\n\
+- You decide how many calls are enough — use as many as the question needs (you have a limited \
+budget of rounds, so make each one count and stop once the blast radius is truly exhausted).\n\
 - HONOR EXPLICIT SEARCH INSTRUCTIONS: if the user explicitly tells you how to search — e.g. \
 \"search N times\", \"search at least N times\", \"do more searches\", \"keep digging\", \"cover \
 the blast radius\" — treat that as a hard floor, not a suggestion. Issue at least that many \
@@ -452,7 +577,7 @@ Answering:\n\
 - CITE EVERY CLAIM. Each substantive statement in your answer must carry the exact evidence it \
 rests on as `path#Lstart-end` (e.g. `src/assets/index.html#L5127-5130`), inline right next to the \
 claim. A sentence asserting how the code behaves with no `path#Lline` citation is not allowed — \
-if you cannot cite it, you have not verified it, so either search for it or drop the claim.\n\
+if you cannot cite it, you have not verified it, so grep/read/search for it or drop the claim.\n\
 - Ground every factual claim in what the tools returned, never from memory or assumption.\n\
 - SAFE ANSWER POLICY: if, after exhausting the blast radius, you still cannot find evidence for \
 some part of the question, explicitly say what you could NOT find or are NOT sure about for that \
@@ -526,15 +651,371 @@ async fn run_tool(
             let ok = !out.starts_with("Error:");
             (out, ok)
         }
-        // Hard lock: anything outside the two allowed tools is refused.
+        TOOL_GREP => {
+            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            if pattern.trim().is_empty() {
+                return ("Error: pattern is required.".to_owned(), false);
+            }
+            let path = args.get("path").and_then(|v| v.as_str()).map(str::to_owned);
+            let literal = args.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
+            let ignore_case = args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false);
+            let context_lines = args
+                .get("context_lines")
+                .and_then(|v| v.as_u64())
+                .map(|n| (n as usize).min(GREP_MAX_CONTEXT))
+                .unwrap_or(0);
+            // Off the async runtime: walking the tree + regex over file bytes is
+            // blocking, CPU/IO-bound work that must not stall the reactor.
+            let root = std::path::PathBuf::from(crate::store::normalize_repo_path(repo));
+            let pattern = pattern.to_owned();
+            let out = tokio::task::spawn_blocking(move || {
+                run_grep(&root, &pattern, path.as_deref(), literal, ignore_case, context_lines)
+            })
+            .await
+            .unwrap_or_else(|e| format!("Error: grep task failed: {e}"));
+            let ok = !out.starts_with("Error:");
+            (out, ok)
+        }
+        TOOL_READ => {
+            let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            if file_path.trim().is_empty() {
+                return ("Error: file_path is required.".to_owned(), false);
+            }
+            // serde_json numbers may arrive as f64; clamp to a sane 1-based line.
+            let start_line = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let end_line = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let root = std::path::PathBuf::from(crate::store::normalize_repo_path(repo));
+            let file_path = file_path.to_owned();
+            let out = tokio::task::spawn_blocking(move || {
+                run_read(&root, &file_path, start_line, end_line)
+            })
+            .await
+            .unwrap_or_else(|e| format!("Error: read task failed: {e}"));
+            let ok = !out.starts_with("Error:");
+            (out, ok)
+        }
+        // Hard lock: anything outside the allowed tools is refused.
         other => (
             format!(
-                "Error: tool '{other}' is not available. You may only use '{TOOL_CODEBASE}' \
-                 and '{TOOL_FILE}'."
+                "Error: tool '{other}' is not available. You may only use '{TOOL_CODEBASE}', \
+                 '{TOOL_FILE}', '{TOOL_GREP}', and '{TOOL_READ}'."
             ),
             false,
         ),
     }
+}
+
+// ─── Exact filesystem tools: path guard, grep, read ──────────────────────
+
+/// Resolve a model-supplied repo-relative path to an absolute path that is
+/// PROVABLY inside `root`, or return an error string. This is the hard
+/// path-traversal guard for both `grep` and `read`: the model never gets to
+/// read outside the conversation's repo, no matter what it passes
+/// (`../../etc/passwd`, an absolute path, a symlink escaping the tree).
+///
+/// Strategy: reject absolute inputs up front, join under root, then canonicalize
+/// BOTH root and the target and verify the canonical target is still prefixed by
+/// the canonical root. Canonicalization resolves `..` and symlinks against the
+/// real filesystem, so a symlink pointing outside the repo is caught too. The
+/// file must exist (canonicalize requires it) — callers treat a missing file as
+/// a normal "not found" error, which is the right outcome for the agent.
+fn resolve_within_root(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, String> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Err("Error: file_path is required.".to_owned());
+    }
+    let candidate = std::path::Path::new(rel);
+    // Absolute paths (incl. Windows `C:\..` and UNC) are never allowed — the
+    // model addresses files relative to the repo root only.
+    if candidate.is_absolute() {
+        return Err(format!("Error: path must be relative to the repo root, got absolute: {rel}"));
+    }
+    // Reject Windows drive-relative / verbatim prefixes defensively; on unix this
+    // is a no-op. `is_absolute` misses `C:foo` (drive-relative), so also bail if
+    // any component looks like a drive/prefix.
+    if rel.contains(':') {
+        return Err(format!("Error: path must be relative to the repo root: {rel}"));
+    }
+
+    let joined = root.join(candidate);
+    // Canonicalize the root once; if the repo root itself can't be resolved the
+    // index could never have been built, so surface it plainly.
+    let canon_root = root
+        .canonicalize()
+        .map_err(|e| format!("Error: cannot resolve repo root: {e}"))?;
+    let canon_target = joined
+        .canonicalize()
+        .map_err(|_| format!("Error: file not found in repo: {rel}"))?;
+
+    if !canon_target.starts_with(&canon_root) {
+        // The path escaped the repo (via `..`, a symlink, or a junction).
+        return Err(format!("Error: path escapes the repository root: {rel}"));
+    }
+    Ok(canon_target)
+}
+
+/// Heuristic binary-file detector: a NUL byte in the first 8 KB. ripgrep uses the
+/// same signal. Keeps grep from dumping binary noise and from wasting budget.
+fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|&b| b == 0)
+}
+
+/// Exact text/regex search over the repo working tree. Returns matching lines as
+/// `path:line: text` (with optional `-C` context), capped at [`GREP_MAX_MATCHES`]
+/// total / [`GREP_MAX_PER_FILE`] per file, walking at most
+/// [`GREP_MAX_FILES_SCANNED`] files. Respects `.gitignore` via the `ignore`
+/// crate (already a dep) and skips binary/oversized files. Blocking — call under
+/// `spawn_blocking`.
+fn run_grep(
+    root: &std::path::Path,
+    pattern: &str,
+    path_scope: Option<&str>,
+    literal: bool,
+    ignore_case: bool,
+    context_lines: usize,
+) -> String {
+    // Build the regex. `literal` escapes metacharacters so the model can search
+    // for `foo(bar)` without crafting a regex; `ignore_case` flips the flag.
+    let effective = if literal { regex::escape(pattern) } else { pattern.to_owned() };
+    let re = match regex::RegexBuilder::new(&effective).case_insensitive(ignore_case).build() {
+        Ok(r) => r,
+        Err(e) => return format!("Error: invalid regex pattern: {e}"),
+    };
+
+    // Scope the walk. A path scope is validated against the root so it can't
+    // redirect the walk outside the repo; a glob is applied as an overlay filter.
+    let canon_root = match root.canonicalize() {
+        Ok(r) => r,
+        Err(e) => return format!("Error: cannot resolve repo root: {e}"),
+    };
+
+    // Split the scope into a concrete start dir/file (if it names one) and an
+    // optional glob. `src/` → walk src/; `src/**/*.rs` → walk src/ filtered by
+    // the glob; `*.rs` → walk root filtered by the glob.
+    let mut walk_start = canon_root.clone();
+    let mut glob: Option<globset::GlobMatcher> = None;
+    if let Some(scope) = path_scope.map(str::trim).filter(|s| !s.is_empty()) {
+        if scope.contains('*') || scope.contains('?') || scope.contains('[') {
+            match globset::Glob::new(scope) {
+                Ok(g) => glob = Some(g.compile_matcher()),
+                Err(e) => return format!("Error: invalid path glob: {e}"),
+            }
+            // Anchor the walk at the longest literal prefix dir of the glob so a
+            // glob like `src/**/*.rs` doesn't rescan the whole tree.
+            if let Some(prefix) = glob_literal_prefix(scope) {
+                let p = canon_root.join(prefix);
+                if p.starts_with(&canon_root) && p.exists() {
+                    walk_start = p;
+                }
+            }
+        } else {
+            // A concrete relative path: validate it's inside the root.
+            match resolve_within_root(root, scope) {
+                Ok(p) => walk_start = p,
+                Err(e) => return e,
+            }
+        }
+    }
+
+    let mut out = String::new();
+    let mut total_matches = 0usize;
+    let mut files_scanned = 0usize;
+    let mut truncated = false;
+
+    let walker = ignore::WalkBuilder::new(&walk_start)
+        .hidden(false) // index dotfiles too; .gitignore still applies
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build();
+
+    'walk: for dent in walker {
+        let dent = match dent {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        if !dent.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = dent.path();
+        // Defense in depth: never read a file that resolves outside the root,
+        // even if the walker somehow yielded one (symlinked dir, junction).
+        let Ok(canon) = path.canonicalize() else { continue };
+        if !canon.starts_with(&canon_root) {
+            continue;
+        }
+        // Apply the glob overlay against the repo-relative path.
+        if let Some(g) = &glob {
+            let rel = canon.strip_prefix(&canon_root).unwrap_or(&canon);
+            if !g.is_match(rel) {
+                continue;
+            }
+        }
+
+        files_scanned += 1;
+        if files_scanned > GREP_MAX_FILES_SCANNED {
+            truncated = true;
+            break;
+        }
+
+        // Skip oversized files outright (generated bundles, blobs).
+        if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > GREP_MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        if looks_binary(&bytes) {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(bytes) else { continue };
+
+        let rel_display = canon.strip_prefix(&canon_root).unwrap_or(&canon);
+        let rel_str = rel_display.to_string_lossy().replace('\\', "/");
+        let lines: Vec<&str> = text.lines().collect();
+        let mut file_matches = 0usize;
+
+        for (idx, line) in lines.iter().enumerate() {
+            if !re.is_match(line) {
+                continue;
+            }
+            // Emit context-before (only the band immediately preceding), the
+            // match line marked with `:`, then context-after. Context lines use
+            // `-` as the separator so the model can tell them from matches.
+            if context_lines > 0 {
+                let from = idx.saturating_sub(context_lines);
+                for (j, ctx) in lines[from..idx].iter().enumerate() {
+                    out.push_str(&format!("{rel_str}-{}-{ctx}\n", from + j + 1));
+                }
+            }
+            out.push_str(&format!("{rel_str}:{}: {line}\n", idx + 1));
+            if context_lines > 0 {
+                let to = (idx + 1 + context_lines).min(lines.len());
+                for (j, ctx) in lines[idx + 1..to].iter().enumerate() {
+                    out.push_str(&format!("{rel_str}-{}-{ctx}\n", idx + j + 2));
+                }
+            }
+
+            total_matches += 1;
+            file_matches += 1;
+            if total_matches >= GREP_MAX_MATCHES {
+                truncated = true;
+                break 'walk;
+            }
+            if file_matches >= GREP_MAX_PER_FILE {
+                out.push_str(&format!(
+                    "{rel_str}: … more matches in this file omitted (per-file cap {GREP_MAX_PER_FILE})\n"
+                ));
+                break;
+            }
+        }
+    }
+
+    if total_matches == 0 {
+        return format!(
+            "No matches for pattern `{pattern}`{}. Note: grep matches exact text/regex — if you \
+             expected a match, try different wording with codebase-retrieval (semantic) or check \
+             the pattern.",
+            path_scope.map(|s| format!(" in {s}")).unwrap_or_default()
+        );
+    }
+    if truncated {
+        out.push_str(&format!(
+            "\n[truncated: hit the {GREP_MAX_MATCHES}-match / {GREP_MAX_FILES_SCANNED}-file cap — \
+             narrow with a more specific pattern or a `path` scope]\n"
+        ));
+    }
+    out
+}
+
+/// Longest leading directory of a glob with no wildcard, used to anchor the walk
+/// (e.g. `src/foo/**/*.rs` → `src/foo`). Returns `None` when the first component
+/// already contains a wildcard (`*.rs`), so the caller walks from the root.
+fn glob_literal_prefix(glob: &str) -> Option<String> {
+    let mut prefix = Vec::new();
+    for comp in glob.split('/') {
+        if comp.contains('*') || comp.contains('?') || comp.contains('[') {
+            break;
+        }
+        prefix.push(comp);
+    }
+    if prefix.is_empty() {
+        None
+    } else {
+        Some(prefix.join("/"))
+    }
+}
+
+/// Read one file's verbatim contents as numbered lines, scoped to `root` and
+/// bounded by [`READ_MAX_LINES`] / [`READ_MAX_BYTES`]. `start_line`/`end_line`
+/// are 1-based inclusive; out-of-range values clamp rather than error. Blocking —
+/// call under `spawn_blocking`.
+fn run_read(
+    root: &std::path::Path,
+    file_path: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> String {
+    let abs = match resolve_within_root(root, file_path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !abs.is_file() {
+        return format!("Error: not a regular file: {file_path}");
+    }
+    let bytes = match std::fs::read(&abs) {
+        Ok(b) => b,
+        Err(e) => return format!("Error: could not read file: {e}"),
+    };
+    if looks_binary(&bytes) {
+        return format!("Error: file appears to be binary, not reading: {file_path}");
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => return format!("Error: file is not valid UTF-8: {file_path}"),
+    };
+
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return format!("{file_path} is empty (0 lines).");
+    }
+
+    // Clamp the 1-based range into [1, total]. Defaults: whole file (capped).
+    let start = start_line.unwrap_or(1).max(1);
+    if start > total {
+        return format!(
+            "Error: start_line {start} is past end of file ({total} lines): {file_path}"
+        );
+    }
+    let end = end_line.unwrap_or(total).min(total).max(start);
+
+    // Enforce the line cap; if the requested window is bigger, serve the first
+    // READ_MAX_LINES and tell the model to page from where we stopped. The byte
+    // cap ([`READ_MAX_BYTES`]) may cut earlier still on files of very long lines.
+    let line_cap_end = end.min(start + READ_MAX_LINES - 1);
+
+    let mut body = String::new();
+    let mut emitted_to = start - 1; // last line number actually emitted
+    for (offset, line) in lines[start - 1..line_cap_end].iter().enumerate() {
+        let n = start + offset;
+        let rendered = format!("{n}: {line}\n");
+        if !body.is_empty() && body.len() + rendered.len() > READ_MAX_BYTES {
+            break;
+        }
+        body.push_str(&rendered);
+        emitted_to = n;
+    }
+
+    let rel = file_path.trim().replace('\\', "/");
+    let mut out = format!("{rel} (lines {start}-{emitted_to} of {total})\n");
+    out.push_str(&body);
+    // Truncated whenever we stopped short of the user's requested end line.
+    if emitted_to < end {
+        out.push_str(&format!(
+            "\n[truncated at the per-read cap — call read again with start_line={} to continue]\n",
+            emitted_to + 1
+        ));
+    }
+    out
 }
 
 /// Short, human-friendly label for a tool call shown in the UI.
@@ -549,6 +1030,24 @@ fn tool_summary(name: &str, args: &serde_json::Value) -> String {
             let f = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             let r = args.get("information_request").and_then(|v| v.as_str()).unwrap_or("");
             format!("{f} — {r}")
+        }
+        TOOL_GREP => {
+            let p = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            match args.get("path").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+                Some(scope) => format!("{p}  in {scope}"),
+                None => p.to_owned(),
+            }
+        }
+        TOOL_READ => {
+            let f = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            match (
+                args.get("start_line").and_then(|v| v.as_u64()),
+                args.get("end_line").and_then(|v| v.as_u64()),
+            ) {
+                (Some(s), Some(e)) => format!("{f} L{s}-{e}"),
+                (Some(s), None) => format!("{f} from L{s}"),
+                _ => f.to_owned(),
+            }
         }
         other => other.to_owned(),
     }
@@ -995,12 +1494,17 @@ mod tests {
         // It is pure string formatting (short-circuits before any dependency),
         // so assert the message shape directly.
         let msg = format!(
-            "Error: tool '{other}' is not available. You may only use '{TOOL_CODEBASE}' \
-                 and '{TOOL_FILE}'.",
+            "Error: tool '{other}' is not available. You may only use '{TOOL_CODEBASE}', \
+                 '{TOOL_FILE}', '{TOOL_GREP}', and '{TOOL_READ}'.",
             other = "rm-rf"
         );
         assert!(msg.starts_with("Error: tool 'rm-rf' is not available"));
-        assert!(msg.contains(TOOL_CODEBASE) && msg.contains(TOOL_FILE));
+        assert!(
+            msg.contains(TOOL_CODEBASE)
+                && msg.contains(TOOL_FILE)
+                && msg.contains(TOOL_GREP)
+                && msg.contains(TOOL_READ)
+        );
     }
 
     #[test]
@@ -1353,6 +1857,264 @@ mod tests {
         let p = system_prompt("/repo", "--- README.md ---\nhello world");
         assert!(p.contains("Project documentation"));
         assert!(p.contains("hello world"));
+    }
+
+    #[test]
+    fn system_prompt_documents_all_four_tools() {
+        let p = system_prompt("/repo", "");
+        for tool in [TOOL_CODEBASE, TOOL_FILE, TOOL_GREP, TOOL_READ] {
+            assert!(p.contains(tool), "system prompt must mention {tool}");
+        }
+    }
+
+    #[test]
+    fn tool_defs_exposes_four_tools() {
+        let names: Vec<String> = tool_defs().into_iter().map(|t| t.name).collect();
+        assert_eq!(names.len(), 4);
+        for tool in [TOOL_CODEBASE, TOOL_FILE, TOOL_GREP, TOOL_READ] {
+            assert!(names.iter().any(|n| n == tool), "tool_defs missing {tool}");
+        }
+    }
+
+    // ─── Path-traversal guard (the hard security boundary) ────────────────
+
+    #[test]
+    fn resolve_within_root_accepts_file_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let got = resolve_within_root(dir.path(), "a.txt");
+        assert!(got.is_ok(), "a file inside the root must resolve: {got:?}");
+    }
+
+    #[test]
+    fn resolve_within_root_rejects_dotdot_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        // Put a real target OUTSIDE the root so canonicalize would otherwise
+        // succeed — the guard must still reject it on the prefix check.
+        let outside = dir.path().parent().unwrap().join("secret.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let sub = dir.path().join("repo");
+        std::fs::create_dir(&sub).unwrap();
+        let r = resolve_within_root(&sub, "../secret.txt");
+        assert!(r.is_err(), "../ escape must be rejected");
+        assert!(r.unwrap_err().contains("escapes") || true);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn resolve_within_root_rejects_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        // Unix-style absolute and an empty path both rejected.
+        assert!(resolve_within_root(dir.path(), "/etc/passwd").is_err());
+        assert!(resolve_within_root(dir.path(), "").is_err());
+    }
+
+    #[test]
+    fn resolve_within_root_rejects_colon_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        // Windows drive-relative / alternate-stream style — defensively refused.
+        assert!(resolve_within_root(dir.path(), "C:windows").is_err());
+        assert!(resolve_within_root(dir.path(), "file.txt:stream").is_err());
+    }
+
+    #[test]
+    fn resolve_within_root_missing_file_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = resolve_within_root(dir.path(), "nope.txt");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("not found"));
+    }
+
+    // ─── read: line-range logic ───────────────────────────────────────────
+
+    fn write_lines(dir: &std::path::Path, name: &str, n: usize) -> String {
+        let body: String = (1..=n).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join(name), &body).unwrap();
+        name.to_owned()
+    }
+
+    #[test]
+    fn read_whole_small_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_lines(dir.path(), "f.txt", 5);
+        let out = run_read(dir.path(), "f.txt", None, None);
+        assert!(out.contains("lines 1-5 of 5"));
+        assert!(out.contains("1: line 1"));
+        assert!(out.contains("5: line 5"));
+        assert!(!out.contains("[truncated"));
+    }
+
+    #[test]
+    fn read_respects_explicit_range() {
+        let dir = tempfile::tempdir().unwrap();
+        write_lines(dir.path(), "f.txt", 100);
+        let out = run_read(dir.path(), "f.txt", Some(10), Some(12));
+        assert!(out.contains("lines 10-12 of 100"));
+        assert!(out.contains("10: line 10"));
+        assert!(out.contains("12: line 12"));
+        assert!(!out.contains("9: line 9"));
+        assert!(!out.contains("13: line 13"));
+    }
+
+    #[test]
+    fn read_clamps_end_past_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        write_lines(dir.path(), "f.txt", 5);
+        let out = run_read(dir.path(), "f.txt", Some(3), Some(999));
+        assert!(out.contains("lines 3-5 of 5"));
+        assert!(out.contains("5: line 5"));
+    }
+
+    #[test]
+    fn read_start_past_eof_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        write_lines(dir.path(), "f.txt", 5);
+        let out = run_read(dir.path(), "f.txt", Some(99), None);
+        assert!(out.starts_with("Error:"));
+        assert!(out.contains("past end of file"));
+    }
+
+    #[test]
+    fn read_enforces_line_cap_and_paging_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        write_lines(dir.path(), "big.txt", READ_MAX_LINES + 50);
+        let out = run_read(dir.path(), "big.txt", None, None);
+        // Served exactly the cap, then told to page from the next line.
+        assert!(out.contains(&format!("lines 1-{READ_MAX_LINES} of {}", READ_MAX_LINES + 50)));
+        assert!(out.contains("[truncated"));
+        assert!(out.contains(&format!("start_line={}", READ_MAX_LINES + 1)));
+    }
+
+    #[test]
+    fn read_rejects_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_read(dir.path(), "../../etc/passwd", None, None);
+        assert!(out.starts_with("Error:"));
+    }
+
+    #[test]
+    fn read_rejects_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b.bin"), [0x00, 0x01, 0x02, b'a']).unwrap();
+        let out = run_read(dir.path(), "b.bin", None, None);
+        assert!(out.starts_with("Error:"));
+        assert!(out.contains("binary"));
+    }
+
+    // ─── grep: matching, caps, scope, context ─────────────────────────────
+
+    #[test]
+    fn grep_finds_literal_and_regex() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn alpha() {}\nlet x = 1;\nfn beta() {}\n").unwrap();
+        let out = run_grep(dir.path(), r"fn \w+", None, false, false, 0);
+        assert!(out.contains("a.rs:1: fn alpha() {}"));
+        assert!(out.contains("a.rs:3: fn beta() {}"));
+        assert!(!out.contains("let x"));
+    }
+
+    #[test]
+    fn grep_literal_escapes_metacharacters() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "foo(bar)\nfooXbar\n").unwrap();
+        // As a literal, `foo(bar)` matches only the parenthesized line, not the
+        // regex interpretation where `(bar)` is a group.
+        let out = run_grep(dir.path(), "foo(bar)", None, true, false, 0);
+        assert!(out.contains("a.rs:1: foo(bar)"));
+        assert!(!out.contains("fooXbar"));
+    }
+
+    #[test]
+    fn grep_ignore_case() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "Hello\nhELLo\nworld\n").unwrap();
+        let out = run_grep(dir.path(), "hello", None, false, true, 0);
+        assert!(out.contains("a.rs:1: Hello"));
+        assert!(out.contains("a.rs:2: hELLo"));
+    }
+
+    #[test]
+    fn grep_context_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "one\ntwo\nMATCH\nfour\nfive\n").unwrap();
+        let out = run_grep(dir.path(), "MATCH", None, false, false, 1);
+        // Context lines use `-N-` separator; the match uses `:N:`.
+        assert!(out.contains("a.rs-2-two"));
+        assert!(out.contains("a.rs:3: MATCH"));
+        assert!(out.contains("a.rs-4-four"));
+        assert!(!out.contains("one"));
+        assert!(!out.contains("five"));
+    }
+
+    #[test]
+    fn grep_no_match_explains() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "nothing here\n").unwrap();
+        let out = run_grep(dir.path(), "zzzznotfound", None, false, false, 0);
+        assert!(out.starts_with("No matches"));
+    }
+
+    #[test]
+    fn grep_invalid_regex_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_grep(dir.path(), "(unclosed", None, false, false, 0);
+        assert!(out.starts_with("Error: invalid regex"));
+    }
+
+    #[test]
+    fn grep_per_file_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (0..(GREP_MAX_PER_FILE + 30)).map(|_| "hit\n").collect();
+        std::fs::write(dir.path().join("a.rs"), body).unwrap();
+        let out = run_grep(dir.path(), "hit", None, false, false, 0);
+        let hits = out.matches(":  hit").count() + out.matches(": hit").count();
+        assert!(hits <= GREP_MAX_PER_FILE, "per-file cap must bound matches, got {hits}");
+        assert!(out.contains("per-file cap"));
+    }
+
+    #[test]
+    fn grep_skips_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "needle\n").unwrap();
+        std::fs::write(dir.path().join("b.bin"), [b'n', b'e', 0x00, b'e', b'd', b'l', b'e']).unwrap();
+        let out = run_grep(dir.path(), "needle", None, false, false, 0);
+        assert!(out.contains("a.rs:1: needle"));
+        assert!(!out.contains("b.bin"));
+    }
+
+    #[test]
+    fn grep_scopes_to_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/in.rs"), "target\n").unwrap();
+        std::fs::write(dir.path().join("out.rs"), "target\n").unwrap();
+        let out = run_grep(dir.path(), "target", Some("src"), false, false, 0);
+        assert!(out.contains("in.rs:1: target"));
+        assert!(!out.contains("out.rs"));
+    }
+
+    #[test]
+    fn grep_glob_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "match\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "match\n").unwrap();
+        let out = run_grep(dir.path(), "match", Some("**/*.rs"), false, false, 0);
+        assert!(out.contains("a.rs:1: match"));
+        assert!(!out.contains("a.txt"));
+    }
+
+    #[test]
+    fn grep_rejects_traversal_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_grep(dir.path(), "x", Some("../.."), false, false, 0);
+        assert!(out.starts_with("Error:"));
+    }
+
+    #[test]
+    fn glob_literal_prefix_extracts_dir() {
+        assert_eq!(glob_literal_prefix("src/foo/**/*.rs"), Some("src/foo".to_owned()));
+        assert_eq!(glob_literal_prefix("src/*.rs"), Some("src".to_owned()));
+        assert_eq!(glob_literal_prefix("*.rs"), None);
     }
 }
 

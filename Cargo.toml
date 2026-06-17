@@ -30,6 +30,7 @@ path = "src/bin/bench_incremental/main.rs"
 
 [dependencies]
 ignore = "0.4"
+globset = "0.4"
 notify = "8"
 notify-debouncer-full = "0.6"
 axum = "0.7"
