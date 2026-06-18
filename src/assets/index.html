@@ -688,16 +688,16 @@
         <p data-i18n="mcp.endpointDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Streamable-HTTP MCP endpoint. Point any MCP-compatible client here.
         </p>
-        <div class="flex items-center gap-2">
+        <div class="relative">
           <code id="mcp-endpoint-url"
-                class="flex-1 font-mono text-sm px-3 py-2 rounded border border-gray-200 dark:border-wiki-border
-                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all"></code>
-          <button id="btn-copy-endpoint" data-i18n="action.copy"
-                  class="px-3 py-2 text-sm rounded border border-gray-300 dark:border-wiki-border
-                         text-gray-600 dark:text-wiki-text-muted hover:bg-gray-100 dark:hover:bg-wiki-surface
-                         hover:text-gray-900 dark:hover:text-wiki-text
-                         focus:outline-none focus:ring-2 focus:ring-blue-400">
-            Copy
+                class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all break-all"></code>
+          <button id="btn-copy-endpoint" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
         </div>
       </div>
@@ -707,32 +707,32 @@
         <p data-i18n="mcp.claudeCmdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Run this command in your terminal to register the MCP server with Claude Code.
         </p>
-        <div class="flex items-center gap-2">
+        <div class="relative">
           <code id="mcp-claude-cmd"
-                class="flex-1 font-mono text-sm px-3 py-2 rounded border border-gray-200 dark:border-wiki-border
-                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-all block"></code>
-          <button id="btn-copy-claude" data-i18n="action.copy"
-                  class="px-3 py-2 text-sm rounded border border-gray-300 dark:border-wiki-border
-                         text-gray-600 dark:text-wiki-text-muted hover:bg-gray-100 dark:hover:bg-wiki-surface
-                         hover:text-gray-900 dark:hover:text-wiki-text
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 shrink-0">
-            Copy
+                class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-all"></code>
+          <button id="btn-copy-claude" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
         </div>
 
         <p data-i18n-html="mcp.claudeMdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">
           Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">CLAUDE.md</code> so Claude prefers the context engine for codebase exploration.
         </p>
-        <div class="flex items-start gap-2">
+        <div class="relative">
           <pre id="mcp-claude-md"
-               class="flex-1 font-mono text-sm px-3 py-2 rounded border border-gray-200 dark:border-wiki-border
+               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
-          <button id="btn-copy-claude-md" data-i18n="action.copy"
-                  class="px-3 py-2 text-sm rounded border border-gray-300 dark:border-wiki-border
-                         text-gray-600 dark:text-wiki-text-muted hover:bg-gray-100 dark:hover:bg-wiki-surface
-                         hover:text-gray-900 dark:hover:text-wiki-text
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 shrink-0">
-            Copy
+          <button id="btn-copy-claude-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
         </div>
         <!-- Placeholder: add more agent registration commands here as needed -->
@@ -1040,16 +1040,16 @@
         <p data-i18n="mcp.endpointDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Streamable-HTTP MCP endpoint. Point any MCP-compatible client here.
         </p>
-        <div class="flex items-center gap-2">
+        <div class="relative">
           <code id="repo-mcp-endpoint-url"
-                class="flex-1 font-mono text-sm px-3 py-2 rounded border border-gray-200 dark:border-wiki-border
-                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all"></code>
-          <button id="btn-copy-repo-endpoint" data-i18n="action.copy"
-                  class="px-3 py-2 text-sm rounded border border-gray-300 dark:border-wiki-border
-                         text-gray-600 dark:text-wiki-text-muted hover:bg-gray-100 dark:hover:bg-wiki-surface
-                         hover:text-gray-900 dark:hover:text-wiki-text
-                         focus:outline-none focus:ring-2 focus:ring-blue-400">
-            Copy
+                class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all break-all"></code>
+          <button id="btn-copy-repo-endpoint" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
         </div>
       </div>
@@ -1059,32 +1059,36 @@
         <p data-i18n="repo.claudeCmdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Run this command in your terminal to register the MCP server with Claude Code for this project.
         </p>
-        <div class="flex items-center gap-2">
+        <div class="relative">
           <code id="repo-claude-cmd"
-                class="flex-1 font-mono text-sm px-3 py-2 rounded border border-gray-200 dark:border-wiki-border
-                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-all block"></code>
-          <button id="btn-copy-repo-claude" data-i18n="action.copy"
-                  class="px-3 py-2 text-sm rounded border border-gray-300 dark:border-wiki-border
-                         text-gray-600 dark:text-wiki-text-muted hover:bg-gray-100 dark:hover:bg-wiki-surface
-                         hover:text-gray-900 dark:hover:text-wiki-text
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 shrink-0">
-            Copy
+                class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-all"></code>
+          <button id="btn-copy-repo-claude" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
         </div>
+
+        <p data-i18n="repo.claudeAcceptDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-3">
+          Then start Claude Code in your terminal — it will detect the new MCP server and ask you to approve it. Accept once to enable codebase-retrieval for this project.
+        </p>
 
         <p data-i18n-html="mcp.claudeMdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">
           Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">CLAUDE.md</code> so Claude prefers the context engine for codebase exploration.
         </p>
-        <div class="flex items-start gap-2">
+        <div class="relative">
           <pre id="repo-claude-md"
-               class="flex-1 font-mono text-sm px-3 py-2 rounded border border-gray-200 dark:border-wiki-border
+               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
-          <button id="btn-copy-repo-claude-md" data-i18n="action.copy"
-                  class="px-3 py-2 text-sm rounded border border-gray-300 dark:border-wiki-border
-                         text-gray-600 dark:text-wiki-text-muted hover:bg-gray-100 dark:hover:bg-wiki-surface
-                         hover:text-gray-900 dark:hover:text-wiki-text
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 shrink-0">
-            Copy
+          <button id="btn-copy-repo-claude-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
         </div>
       </div>
@@ -1566,6 +1570,9 @@ const STR = {
   'repo.claudeCmdDesc': { en: `Run this command in your terminal to register the MCP server with Claude Code for this project.`,
                          vi: `Chạy lệnh này trong terminal để đăng ký MCP server với Claude Code cho project này.`,
                          zh: `在终端中运行此命令，将 MCP 服务器注册到 Claude Code（项目范围）。` },
+  'repo.claudeAcceptDesc': { en: `Then start Claude Code in your terminal — it will detect the new MCP server and ask you to approve it. Accept once to enable codebase-retrieval for this project.`,
+                         vi: `Sau đó mở Claude Code trong terminal — nó sẽ phát hiện MCP server mới và hỏi bạn approve. Accept một lần để bật codebase-retrieval cho project này.`,
+                         zh: `然后在终端中启动 Claude Code — 它会检测到新的 MCP 服务器并请求你批准。接受一次即可为该项目启用 codebase-retrieval。` },
   'repo.rebuild':      { en: `Rebuild Index`, vi: `Rebuild Index`, zh: `重建索引` },
   'repo.incremental':  { en: `Incremental Update`, vi: `Incremental Update`, zh: `增量更新` },
   // Repo chat
@@ -3523,14 +3530,25 @@ MCP_TABS.forEach((t, i) => {
   document.getElementById(t.btn).addEventListener('click', () => activateMcpTab(i));
 });
 
-// Copy-button helper: write text to clipboard, flash "Copied" for 1.5s.
+// Check (success) glyph swapped in after a copy, restored after 1.5s.
+const COPY_CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><polyline points="20 6 9 17 4 12"/></svg>';
+// Copy-button helper: write text to clipboard, flash a check icon for 1.5s.
+// Icon buttons carry an inline SVG (no text), so we swap innerHTML, not textContent.
 function makeCopyBtn(btnId, getTextFn) {
-  document.getElementById(btnId).addEventListener('click', () => {
-    const btn = document.getElementById(btnId);
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.addEventListener('click', () => {
     navigator.clipboard.writeText(getTextFn()).then(() => {
-      const orig = btn.textContent;
-      btn.textContent = t('action.copied');
-      setTimeout(() => { btn.textContent = orig; }, 1500);
+      if (btn.dataset.copied) return; // ignore re-clicks mid-flash
+      const orig = btn.innerHTML;
+      btn.dataset.copied = '1';
+      btn.innerHTML = COPY_CHECK_SVG;
+      btn.classList.add('text-green-600', 'dark:text-green-400');
+      setTimeout(() => {
+        btn.innerHTML = orig;
+        btn.classList.remove('text-green-600', 'dark:text-green-400');
+        delete btn.dataset.copied;
+      }, 1500);
     }).catch(() => {});
   });
 }
