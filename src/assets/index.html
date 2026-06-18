@@ -664,16 +664,16 @@
 
       <!-- MCP sub-tab bar -->
       <div role="tablist" id="tablist-mcp" class="flex border-b border-gray-200 dark:border-wiki-border mb-6">
-        <button role="tab" id="mcptab-endpoint" aria-selected="true" aria-controls="mcppanel-endpoint" data-i18n="mcp.endpoint"
+        <button role="tab" id="mcptab-claude" aria-selected="true" aria-controls="mcppanel-claude" data-i18n="mcp.claudeCode"
                 class="mcptab-btn px-4 py-2 text-sm border-b-2 border-blue-600 dark:border-wiki-border-active text-gray-900 dark:text-wiki-heading
                        focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Endpoint
+          Claude Code
         </button>
-        <button role="tab" id="mcptab-claude" aria-selected="false" aria-controls="mcppanel-claude" data-i18n="mcp.claudeCode"
+        <button role="tab" id="mcptab-endpoint" aria-selected="false" aria-controls="mcppanel-endpoint" data-i18n="mcp.endpoint"
                 class="mcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
                        hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
                        focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Claude Code
+          Endpoint
         </button>
         <button role="tab" id="mcptab-test" aria-selected="false" aria-controls="mcppanel-test" data-i18n="mcp.test"
                 class="mcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
@@ -684,7 +684,7 @@
       </div>
 
       <!-- MCP sub-panel: Endpoint -->
-      <div role="tabpanel" id="mcppanel-endpoint">
+      <div role="tabpanel" id="mcppanel-endpoint" class="hidden">
         <p data-i18n="mcp.endpointDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Streamable-HTTP MCP endpoint. Point any MCP-compatible client here.
         </p>
@@ -703,7 +703,7 @@
       </div>
 
       <!-- MCP sub-panel: Claude Code -->
-      <div role="tabpanel" id="mcppanel-claude" class="hidden">
+      <div role="tabpanel" id="mcppanel-claude">
         <p data-i18n="mcp.claudeCmdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Run this command in your terminal to register the MCP server with Claude Code.
         </p>
@@ -1016,16 +1016,16 @@
 
       <!-- Repo MCP sub-tab bar -->
       <div role="tablist" id="tablist-repo-mcp" class="flex border-b border-gray-200 dark:border-wiki-border mb-6">
-        <button role="tab" id="repo-mcptab-endpoint" aria-selected="true" aria-controls="repo-mcppanel-endpoint" data-i18n="mcp.endpoint"
+        <button role="tab" id="repo-mcptab-claude" aria-selected="true" aria-controls="repo-mcppanel-claude" data-i18n="mcp.claudeCode"
                 class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-blue-600 dark:border-wiki-border-active text-gray-900 dark:text-wiki-heading
                        focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Endpoint
+          Claude Code
         </button>
-        <button role="tab" id="repo-mcptab-claude" aria-selected="false" aria-controls="repo-mcppanel-claude" data-i18n="mcp.claudeCode"
+        <button role="tab" id="repo-mcptab-endpoint" aria-selected="false" aria-controls="repo-mcppanel-endpoint" data-i18n="mcp.endpoint"
                 class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
                        hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
                        focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Claude Code
+          Endpoint
         </button>
         <button role="tab" id="repo-mcptab-test" aria-selected="false" aria-controls="repo-mcppanel-test" data-i18n="mcp.test"
                 class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
@@ -1036,7 +1036,7 @@
       </div>
 
       <!-- Repo MCP sub-panel: Endpoint -->
-      <div role="tabpanel" id="repo-mcppanel-endpoint">
+      <div role="tabpanel" id="repo-mcppanel-endpoint" class="hidden">
         <p data-i18n="mcp.endpointDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Streamable-HTTP MCP endpoint. Point any MCP-compatible client here.
         </p>
@@ -1055,7 +1055,7 @@
       </div>
 
       <!-- Repo MCP sub-panel: Claude Code -->
-      <div role="tabpanel" id="repo-mcppanel-claude" class="hidden">
+      <div role="tabpanel" id="repo-mcppanel-claude">
         <p data-i18n="repo.claudeCmdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
           Run this command in your terminal to register the MCP server with Claude Code for this project.
         </p>
@@ -3503,8 +3503,8 @@ function initMcpWorkspaceChoices() {
 
 // ─── MCP sub-tab switching ────────────────────────────────────────────────
 const MCP_TABS = [
-  { btn: 'mcptab-endpoint', panel: 'mcppanel-endpoint' },
   { btn: 'mcptab-claude',   panel: 'mcppanel-claude' },
+  { btn: 'mcptab-endpoint', panel: 'mcppanel-endpoint' },
   { btn: 'mcptab-test',     panel: 'mcppanel-test' },
 ];
 
@@ -3654,8 +3654,8 @@ function initRepoMcpTab() {
 
 // Repo MCP sub-tab switching
 const REPO_MCP_TABS = [
-  { btn: 'repo-mcptab-endpoint', panel: 'repo-mcppanel-endpoint' },
   { btn: 'repo-mcptab-claude',   panel: 'repo-mcppanel-claude' },
+  { btn: 'repo-mcptab-endpoint', panel: 'repo-mcppanel-endpoint' },
   { btn: 'repo-mcptab-test',     panel: 'repo-mcppanel-test' },
 ];
 
