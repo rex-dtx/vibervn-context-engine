@@ -823,17 +823,17 @@
                      focus:outline-none focus:ring-2 focus:ring-blue-400">
         Index Explorer
       </button>
-      <button role="tab" id="subtab-search" aria-selected="false" aria-controls="subpanel-search" data-i18n="repo.search"
-              class="subtab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
-                     hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
-                     focus:outline-none focus:ring-2 focus:ring-blue-400">
-        Search
-      </button>
       <button role="tab" id="subtab-claude" aria-selected="false" aria-controls="subpanel-claude" data-i18n="tab.mcp"
               class="subtab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
                      hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
                      focus:outline-none focus:ring-2 focus:ring-blue-400">
         MCP
+      </button>
+      <button role="tab" id="subtab-search" aria-selected="false" aria-controls="subpanel-search" data-i18n="repo.search"
+              class="subtab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
+                     hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
+                     focus:outline-none focus:ring-2 focus:ring-blue-400">
+        Search
       </button>
     </div>
 
@@ -3611,8 +3611,8 @@ document.getElementById('btn-mcp-run').addEventListener('click', runMcpTest);
 // ─── Sub-tab switching ──────────────────────────────────────────────────────
 const SUBTABS = [
   { btn: 'subtab-explorer', panel: 'subpanel-explorer' },
-  { btn: 'subtab-search',   panel: 'subpanel-search' },
   { btn: 'subtab-claude',   panel: 'subpanel-claude' },
+  { btn: 'subtab-search',   panel: 'subpanel-search' },
 ];
 
 function activateSubTab(idx) {
@@ -3631,8 +3631,8 @@ function activateSubTab(idx) {
       panel.classList.add('hidden');
     }
   });
-  if (idx === 1) document.getElementById('input-search').focus();
-  if (idx === 2) initRepoMcpTab();
+  if (idx === 2) document.getElementById('input-search').focus();
+  if (idx === 1) initRepoMcpTab();
 }
 
 SUBTABS.forEach((t, i) => {
