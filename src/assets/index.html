@@ -120,7 +120,9 @@
   <!-- Header -->
   <div class="flex items-end justify-between border-b border-gray-200 dark:border-wiki-border pb-4 mb-6">
     <div>
-      <h1 class="font-wiki text-3xl dark:text-wiki-heading text-gray-900">Context Engine</h1>
+      <h1 id="app-logo" role="button" tabindex="0" aria-label="Context Engine — go to Repositories"
+          class="font-wiki text-3xl dark:text-wiki-heading text-gray-900 cursor-pointer
+                 focus:outline-none focus:ring-2 focus:ring-blue-400 rounded">Context Engine</h1>
     </div>
     <div class="flex items-center gap-2">
     <!-- Search quota / Buy Plan (filled by renderHeaderQuota) -->
@@ -2064,6 +2066,16 @@ function activateTab(idx) {
 TABS.forEach((t, i) => {
   document.getElementById(t.btn).addEventListener('click', () => activateTab(i));
 });
+
+// Logo doubles as a "home" shortcut → Repositories tab.
+(function() {
+  const logo = document.getElementById('app-logo');
+  if (!logo) return;
+  logo.addEventListener('click', () => activateTab(0));
+  logo.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTab(0); }
+  });
+})();
 
 // ─── Render ────────────────────────────────────────────────────────────────
 function renderRepos() {
