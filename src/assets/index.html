@@ -741,6 +741,21 @@
         </button>
       </div>
 
+      <div role="note"
+           class="flex items-start gap-2 text-sm px-3 py-2 mb-6 rounded border border-gray-200 dark:border-wiki-border
+                  bg-gray-50 dark:bg-wiki-surface text-gray-700 dark:text-wiki-text-muted">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round"
+             class="w-4 h-4 mt-0.5 shrink-0 text-blue-600 dark:text-wiki-link">
+          <circle cx="12" cy="12" r="10"></circle>
+          <path d="M12 16v-4"></path>
+          <path d="M12 8h.01"></path>
+        </svg>
+        <p data-i18n="mcp.globalScopeWarning">
+          Per-project MCP is easier to manage than global setup. Open a repo, then use that repo's MCP tab.
+        </p>
+      </div>
+
       <!-- MCP sub-panel: Endpoint -->
       <div role="tabpanel" id="mcppanel-endpoint" class="hidden">
         <p data-i18n="mcp.endpointDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
@@ -1706,6 +1721,9 @@ const STR = {
   'mcp.codex':         { en: `Codex`, vi: `Codex`, zh: `Codex` },
   'mcp.test':          { en: `Test`, vi: `Test`, zh: `测试` },
   'mcp.endpointDesc':  { en: `Streamable-HTTP MCP endpoint. Point any MCP-compatible client here.`, vi: `Endpoint MCP Streamable-HTTP. Trỏ bất kỳ client tương thích MCP nào tới đây.`, zh: `Streamable-HTTP MCP 端点。将任何兼容 MCP 的客户端指向此处。` },
+  'mcp.globalScopeWarning': { en: `Per-project MCP is easier to manage than global setup. Open a repo, then use that repo's MCP tab.`,
+                         vi: `MCP theo từng project dễ quản lý hơn setup global. Mở một repo, rồi dùng tab MCP của repo đó.`,
+                         zh: `按项目配置 MCP 比全局设置更易管理。打开一个 repo，然后使用该 repo 的 MCP 标签。` },
   'mcp.claudeCmdDesc': { en: `Run this command in your terminal to register the MCP server with Claude Code.`, vi: `Chạy lệnh này trong terminal để đăng ký MCP server với Claude Code.`, zh: `在终端中运行此命令，将 MCP 服务器注册到 Claude Code。` },
   'mcp.codexCmdDesc':  { en: `Run this command in your terminal to register the MCP server with Codex.`, vi: `Chạy lệnh này trong terminal để đăng ký MCP server với Codex.`, zh: `在终端中运行此命令，将 MCP 服务器注册到 Codex。` },
   'mcp.agentsMdDesc':  { en: `Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code> so Codex prefers the context engine for codebase exploration.`,
