@@ -721,6 +721,12 @@
                        focus:outline-none focus:ring-2 focus:ring-blue-400">
           Claude Code
         </button>
+        <button role="tab" id="mcptab-codex" aria-selected="false" aria-controls="mcppanel-codex" data-i18n="mcp.codex"
+                class="mcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
+                       hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
+                       focus:outline-none focus:ring-2 focus:ring-blue-400">
+          Codex
+        </button>
         <button role="tab" id="mcptab-endpoint" aria-selected="false" aria-controls="mcppanel-endpoint" data-i18n="mcp.endpoint"
                 class="mcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
                        hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
@@ -745,6 +751,41 @@
                 class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
                        bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all break-all"></code>
           <button id="btn-copy-endpoint" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- MCP sub-panel: Codex -->
+      <div role="tabpanel" id="mcppanel-codex" class="hidden">
+        <p data-i18n="mcp.codexCmdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
+          Run this command in your terminal to register the MCP server with Codex.
+        </p>
+        <div class="relative">
+          <code id="mcp-codex-cmd"
+                class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-all"></code>
+          <button id="btn-copy-codex" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+        </div>
+
+        <p data-i18n-html="mcp.agentsMdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">
+          Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code> so Codex prefers the context engine for codebase exploration.
+        </p>
+        <div class="relative">
+          <pre id="mcp-agents-md"
+               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+          <button id="btn-copy-agents-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
                   class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
                          bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
                          hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
@@ -1081,6 +1122,12 @@
                        focus:outline-none focus:ring-2 focus:ring-blue-400">
           Claude Code
         </button>
+        <button role="tab" id="repo-mcptab-codex" aria-selected="false" aria-controls="repo-mcppanel-codex" data-i18n="mcp.codex"
+                class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
+                       hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
+                       focus:outline-none focus:ring-2 focus:ring-blue-400">
+          Codex
+        </button>
         <button role="tab" id="repo-mcptab-endpoint" aria-selected="false" aria-controls="repo-mcppanel-endpoint" data-i18n="mcp.endpoint"
                 class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
                        hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
@@ -1144,6 +1191,41 @@
                class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
           <button id="btn-copy-repo-claude-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Repo MCP sub-panel: Codex -->
+      <div role="tabpanel" id="repo-mcppanel-codex" class="hidden">
+        <p data-i18n-html="repo.codexConfigDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
+          Add the following to this project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">.codex/config.toml</code>.
+        </p>
+        <div class="relative">
+          <pre id="repo-codex-config"
+               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+          <button id="btn-copy-repo-codex-config" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+        </div>
+
+        <p data-i18n-html="mcp.agentsMdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">
+          Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code> so Codex prefers the context engine for codebase exploration.
+        </p>
+        <div class="relative">
+          <pre id="repo-agents-md"
+               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+          <button id="btn-copy-repo-agents-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
                   class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
                          bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
                          hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
@@ -1621,9 +1703,14 @@ const STR = {
   // MCP
   'mcp.endpoint':      { en: `Endpoint`, vi: `Endpoint`, zh: `端点` },
   'mcp.claudeCode':    { en: `Claude Code`, vi: `Claude Code`, zh: `Claude Code` },
+  'mcp.codex':         { en: `Codex`, vi: `Codex`, zh: `Codex` },
   'mcp.test':          { en: `Test`, vi: `Test`, zh: `测试` },
   'mcp.endpointDesc':  { en: `Streamable-HTTP MCP endpoint. Point any MCP-compatible client here.`, vi: `Endpoint MCP Streamable-HTTP. Trỏ bất kỳ client tương thích MCP nào tới đây.`, zh: `Streamable-HTTP MCP 端点。将任何兼容 MCP 的客户端指向此处。` },
   'mcp.claudeCmdDesc': { en: `Run this command in your terminal to register the MCP server with Claude Code.`, vi: `Chạy lệnh này trong terminal để đăng ký MCP server với Claude Code.`, zh: `在终端中运行此命令，将 MCP 服务器注册到 Claude Code。` },
+  'mcp.codexCmdDesc':  { en: `Run this command in your terminal to register the MCP server with Codex.`, vi: `Chạy lệnh này trong terminal để đăng ký MCP server với Codex.`, zh: `在终端中运行此命令，将 MCP 服务器注册到 Codex。` },
+  'mcp.agentsMdDesc':  { en: `Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code> so Codex prefers the context engine for codebase exploration.`,
+                         vi: `Thêm nội dung sau vào <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code> của dự án để Codex ưu tiên dùng context engine khi khám phá codebase.`,
+                         zh: `将以下内容添加到项目的 <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code>，让 Codex 在探索代码库时优先使用 context engine。` },
   'mcp.claudeMdDesc':  { en: `Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">CLAUDE.md</code> so Claude prefers the context engine for codebase exploration.`,
                          vi: `Thêm nội dung sau vào <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">CLAUDE.md</code> của dự án để Claude ưu tiên dùng context engine khi khám phá codebase.`,
                          zh: `将以下内容添加到项目的 <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">CLAUDE.md</code>，让 Claude 在探索代码库时优先使用 context engine。` },
@@ -1641,6 +1728,9 @@ const STR = {
   'repo.claudeAcceptDesc': { en: `Then start Claude Code in your terminal — it will detect the new MCP server and ask you to approve it. Accept once to enable codebase-retrieval for this project.`,
                          vi: `Sau đó mở Claude Code trong terminal — nó sẽ phát hiện MCP server mới và hỏi bạn approve. Accept một lần để bật codebase-retrieval cho project này.`,
                          zh: `然后在终端中启动 Claude Code — 它会检测到新的 MCP 服务器并请求你批准。接受一次即可为该项目启用 codebase-retrieval。` },
+  'repo.codexConfigDesc': { en: `Add the following to this project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">.codex/config.toml</code>.`,
+                         vi: `Thêm nội dung sau vào <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">.codex/config.toml</code> của project này.`,
+                         zh: `将以下内容添加到此项目的 <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">.codex/config.toml</code>。` },
   'repo.rebuild':      { en: `Rebuild Index`, vi: `Rebuild Index`, zh: `重建索引` },
   'repo.incremental':  { en: `Incremental Update`, vi: `Incremental Update`, zh: `增量更新` },
   // Repo chat
@@ -3648,6 +3738,24 @@ function closeRepoSearch() {
 document.getElementById('btn-search-back').addEventListener('click', closeRepoSearch);
 
 // ─── MCP tab init (populate URLs when the MCP tab is shown) ──────────────
+function buildAgentsMdSnippet() {
+  return [
+    'AGENTS.md',
+    '',
+    'When asked about the codebase, project structure, or to find code, always use the context-engine MCP tool (codebase-retrieval) in the root workspace first before reading individual files. Use `codebase-retrieval` instead of the Explore subagent for codebase exploration and search tasks.',
+    '',
+    'When you need to read a specific file but don\'t know the exact line range, use the file-retrieval MCP tool instead of reading the entire file. Describe what information you need and it returns only the relevant snippets with line numbers. Use the Read tool with the returned line ranges (expanded as needed) to get current content before making edits.',
+  ].join('\n');
+}
+
+function buildCodexConfigSnippet(endpointUrl) {
+  const escapedUrl = endpointUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return [
+    '[mcp_servers.codebase-retrieval]',
+    `url = "${escapedUrl}"`,
+  ].join('\n');
+}
+
 function buildClaudeMdSnippet() {
   const enabled = (cfg && cfg.enabled_mcp_tools) || ['codebase-retrieval', 'file-retrieval'];
   const lines = [
@@ -3670,9 +3778,12 @@ function initMcpUrls() {
   const origin = window.location.origin;
   const endpointUrl = origin + '/mcp';
   const claudeCmd = 'claude mcp add --scope user --transport http codebase-retrieval ' + endpointUrl;
+  const codexCmd = 'codex mcp add codebase-retrieval --url ' + endpointUrl;
 
   document.getElementById('mcp-endpoint-url').textContent = endpointUrl;
   document.getElementById('mcp-claude-cmd').textContent = claudeCmd;
+  document.getElementById('mcp-codex-cmd').textContent = codexCmd;
+  document.getElementById('mcp-agents-md').textContent = buildAgentsMdSnippet();
   document.getElementById('mcp-claude-md').textContent = buildClaudeMdSnippet();
 
   initMcpWorkspaceChoices();
@@ -3737,6 +3848,7 @@ function initMcpWorkspaceChoices() {
 // ─── MCP sub-tab switching ────────────────────────────────────────────────
 const MCP_TABS = [
   { btn: 'mcptab-claude',   panel: 'mcppanel-claude' },
+  { btn: 'mcptab-codex',    panel: 'mcppanel-codex' },
   { btn: 'mcptab-endpoint', panel: 'mcppanel-endpoint' },
   { btn: 'mcptab-test',     panel: 'mcppanel-test' },
 ];
@@ -3787,6 +3899,8 @@ function makeCopyBtn(btnId, getTextFn) {
 }
 makeCopyBtn('btn-copy-endpoint', () => document.getElementById('mcp-endpoint-url').textContent);
 makeCopyBtn('btn-copy-claude',   () => document.getElementById('mcp-claude-cmd').textContent);
+makeCopyBtn('btn-copy-codex',    () => document.getElementById('mcp-codex-cmd').textContent);
+makeCopyBtn('btn-copy-agents-md', () => document.getElementById('mcp-agents-md').textContent);
 makeCopyBtn('btn-copy-claude-md', () => document.getElementById('mcp-claude-md').textContent);
 
 // Run the MCP test tool call.
@@ -3881,6 +3995,8 @@ function initRepoMcpTab() {
   const cmd = 'claude mcp add --scope project --transport http codebase-retrieval ' + endpointUrl;
   document.getElementById('repo-mcp-endpoint-url').textContent = endpointUrl;
   document.getElementById('repo-claude-cmd').textContent = cmd;
+  document.getElementById('repo-codex-config').textContent = buildCodexConfigSnippet(endpointUrl);
+  document.getElementById('repo-agents-md').textContent = buildAgentsMdSnippet();
   document.getElementById('repo-claude-md').textContent = buildClaudeMdSnippet();
   activateRepoMcpTab(0);
 }
@@ -3888,6 +4004,7 @@ function initRepoMcpTab() {
 // Repo MCP sub-tab switching
 const REPO_MCP_TABS = [
   { btn: 'repo-mcptab-claude',   panel: 'repo-mcppanel-claude' },
+  { btn: 'repo-mcptab-codex',    panel: 'repo-mcppanel-codex' },
   { btn: 'repo-mcptab-endpoint', panel: 'repo-mcppanel-endpoint' },
   { btn: 'repo-mcptab-test',     panel: 'repo-mcppanel-test' },
 ];
@@ -3960,6 +4077,8 @@ document.getElementById('btn-repo-mcp-run').addEventListener('click', runRepoMcp
 
 makeCopyBtn('btn-copy-repo-endpoint',  () => document.getElementById('repo-mcp-endpoint-url').textContent);
 makeCopyBtn('btn-copy-repo-claude',    () => document.getElementById('repo-claude-cmd').textContent);
+makeCopyBtn('btn-copy-repo-codex-config', () => document.getElementById('repo-codex-config').textContent);
+makeCopyBtn('btn-copy-repo-agents-md', () => document.getElementById('repo-agents-md').textContent);
 makeCopyBtn('btn-copy-repo-claude-md', () => document.getElementById('repo-claude-md').textContent);
 
 async function runSearch() {
