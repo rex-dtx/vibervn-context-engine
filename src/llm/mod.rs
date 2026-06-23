@@ -1,12 +1,12 @@
 pub mod google;
 pub mod openai;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use crate::config::LlmConfig;
 use anyhow::{Result, bail};
 use reqwest::Client;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tracing::warn;
-use crate::config::LlmConfig;
 
 // ─── Shared types for tool-calling ───────────────────────────────────────
 
@@ -85,7 +85,11 @@ fn provider_supports_structured_output(provider: &str) -> bool {
 /// excluded from retries — waiting won't help within the same request.
 fn is_rate_limited(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
-    msg.contains("429") && (msg.contains("Too Many Requests") || msg.contains("RESOURCE_EXHAUSTED") || msg.contains("rate") || msg.contains("quota"))
+    msg.contains("429")
+        && (msg.contains("Too Many Requests")
+            || msg.contains("RESOURCE_EXHAUSTED")
+            || msg.contains("rate")
+            || msg.contains("quota"))
 }
 
 impl LlmClient {
@@ -128,10 +132,40 @@ impl LlmClient {
     }
 
     /// Dispatch to the provider-specific completion function.
-    async fn call_provider(&self, system: &str, user: &str, temperature: f32, structured: bool, key: &str) -> Result<String> {
+    async fn call_provider(
+        &self,
+        system: &str,
+        user: &str,
+        temperature: f32,
+        structured: bool,
+        key: &str,
+    ) -> Result<String> {
         match self.provider.as_str() {
-            "google" => google::complete(&self.http, &self.model, key, system, user, temperature, structured).await,
-            "openai" => openai::complete(&self.http, &self.model, key, system, user, temperature, structured, self.openai_base_url.as_deref()).await,
+            "google" => {
+                google::complete(
+                    &self.http,
+                    &self.model,
+                    key,
+                    system,
+                    user,
+                    temperature,
+                    structured,
+                )
+                .await
+            }
+            "openai" => {
+                openai::complete(
+                    &self.http,
+                    &self.model,
+                    key,
+                    system,
+                    user,
+                    temperature,
+                    structured,
+                    self.openai_base_url.as_deref(),
+                )
+                .await
+            }
             other => bail!("unsupported LLM provider: {other}"),
         }
     }
@@ -140,7 +174,13 @@ impl LlmClient {
     /// Rotates through all keys on failure; keys that hit a rate limit (429)
     /// are excluded from the retry pass so the request isn't wasted on a
     /// known-exhausted quota.
-    pub async fn complete(&self, system: &str, user: &str, temperature: f32, structured: bool) -> Result<String> {
+    pub async fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        temperature: f32,
+        structured: bool,
+    ) -> Result<String> {
         let n_keys = self.api_keys.len();
         let start_cursor = self.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
 
@@ -151,7 +191,10 @@ impl LlmClient {
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
             let key = &self.api_keys[key_idx];
-            match self.call_provider(system, user, temperature, structured, key).await {
+            match self
+                .call_provider(system, user, temperature, structured, key)
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     if is_rate_limited(&e) {
@@ -172,7 +215,10 @@ impl LlmClient {
                 continue;
             }
             let key = &self.api_keys[key_idx];
-            match self.call_provider(system, user, temperature, structured, key).await {
+            match self
+                .call_provider(system, user, temperature, structured, key)
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     last_err = Some(e);
@@ -197,28 +243,63 @@ impl LlmClient {
     ) -> Result<ToolTurnResult> {
         match self.provider.as_str() {
             "google" => {
-                let r = google::complete_with_tools(&self.http, &self.model, key, system, contents, tools, temperature, force_tool_use).await?;
+                let r = google::complete_with_tools(
+                    &self.http,
+                    &self.model,
+                    key,
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                )
+                .await?;
                 match r {
                     google::ToolTurnResult::Text(t) => Ok(ToolTurnResult::Text(t)),
                     google::ToolTurnResult::ToolCalls(calls) => Ok(ToolTurnResult::ToolCalls(
-                        calls.into_iter().map(|c| ToolCall {
-                            name: c.call.name,
-                            id: c.call.id,
-                            args: c.call.args,
-                            thought_signature: c.thought_signature,
-                        }).collect()
+                        calls
+                            .into_iter()
+                            .map(|c| ToolCall {
+                                name: c.call.name,
+                                id: c.call.id,
+                                args: c.call.args,
+                                thought_signature: c.thought_signature,
+                            })
+                            .collect(),
                     )),
                 }
             }
             "openai" => {
-                let r = openai::complete_with_tools(&self.http, &self.model, key, system, contents, tools, temperature, force_tool_use, prompt_cache_key, self.openai_base_url.as_deref(), self.openai_force_tool_use).await?;
+                let r = openai::complete_with_tools(
+                    &self.http,
+                    &self.model,
+                    key,
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                    prompt_cache_key,
+                    self.openai_base_url.as_deref(),
+                    self.openai_force_tool_use,
+                )
+                .await?;
                 match r {
                     openai::ToolTurnResult::Text(t) => Ok(ToolTurnResult::Text(t)),
                     openai::ToolTurnResult::ToolCalls(calls) => Ok(ToolTurnResult::ToolCalls(
-                        calls.into_iter().map(|c| {
-                            let args = serde_json::from_str(&c.function.arguments).unwrap_or(serde_json::Value::Object(Default::default()));
-                            ToolCall { name: c.function.name, id: Some(c.id), args, thought_signature: None }
-                        }).collect()
+                        calls
+                            .into_iter()
+                            .map(|c| {
+                                let args = serde_json::from_str(&c.function.arguments)
+                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                                ToolCall {
+                                    name: c.function.name,
+                                    id: Some(c.id),
+                                    args,
+                                    thought_signature: None,
+                                }
+                            })
+                            .collect(),
                     )),
                 }
             }
@@ -252,7 +333,18 @@ impl LlmClient {
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
             let key = &self.api_keys[key_idx];
-            match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key, prompt_cache_key).await {
+            match self
+                .call_provider_with_tools(
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                    key,
+                    prompt_cache_key,
+                )
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     if is_rate_limited(&e) {
@@ -272,7 +364,18 @@ impl LlmClient {
                 continue;
             }
             let key = &self.api_keys[key_idx];
-            match self.call_provider_with_tools(system, contents, tools, temperature, force_tool_use, key, prompt_cache_key).await {
+            match self
+                .call_provider_with_tools(
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                    key,
+                    prompt_cache_key,
+                )
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     last_err = Some(e);
@@ -309,34 +412,66 @@ impl LlmClient {
         match self.provider.as_str() {
             "google" => {
                 let r = google::complete_with_tools_streaming(
-                    &self.http, &self.model, key, system, contents, tools, temperature,
-                    force_tool_use, on_token, started,
-                ).await?;
+                    &self.http,
+                    &self.model,
+                    key,
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                    on_token,
+                    started,
+                )
+                .await?;
                 match r {
                     google::ToolTurnResult::Text(t) => Ok(ToolTurnResult::Text(t)),
                     google::ToolTurnResult::ToolCalls(calls) => Ok(ToolTurnResult::ToolCalls(
-                        calls.into_iter().map(|c| ToolCall {
-                            name: c.call.name,
-                            id: c.call.id,
-                            args: c.call.args,
-                            thought_signature: c.thought_signature,
-                        }).collect()
+                        calls
+                            .into_iter()
+                            .map(|c| ToolCall {
+                                name: c.call.name,
+                                id: c.call.id,
+                                args: c.call.args,
+                                thought_signature: c.thought_signature,
+                            })
+                            .collect(),
                     )),
                 }
             }
             "openai" => {
                 let r = openai::complete_with_tools_streaming(
-                    &self.http, &self.model, key, system, contents, tools, temperature,
-                    force_tool_use, prompt_cache_key, self.openai_base_url.as_deref(),
-                    self.openai_force_tool_use, on_token, started,
-                ).await?;
+                    &self.http,
+                    &self.model,
+                    key,
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                    prompt_cache_key,
+                    self.openai_base_url.as_deref(),
+                    self.openai_force_tool_use,
+                    on_token,
+                    started,
+                )
+                .await?;
                 match r {
                     openai::ToolTurnResult::Text(t) => Ok(ToolTurnResult::Text(t)),
                     openai::ToolTurnResult::ToolCalls(calls) => Ok(ToolTurnResult::ToolCalls(
-                        calls.into_iter().map(|c| {
-                            let args = serde_json::from_str(&c.function.arguments).unwrap_or(serde_json::Value::Object(Default::default()));
-                            ToolCall { name: c.function.name, id: Some(c.id), args, thought_signature: None }
-                        }).collect()
+                        calls
+                            .into_iter()
+                            .map(|c| {
+                                let args = serde_json::from_str(&c.function.arguments)
+                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                                ToolCall {
+                                    name: c.function.name,
+                                    id: Some(c.id),
+                                    args,
+                                    thought_signature: None,
+                                }
+                            })
+                            .collect(),
                     )),
                 }
             }
@@ -375,10 +510,20 @@ impl LlmClient {
             let key_idx = (start_cursor + offset) % n_keys;
             let key = &self.api_keys[key_idx];
             let started = AtomicBool::new(false);
-            match self.call_provider_with_tools_streaming(
-                system, contents, tools, temperature, force_tool_use, key,
-                prompt_cache_key, on_token, &started,
-            ).await {
+            match self
+                .call_provider_with_tools_streaming(
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                    key,
+                    prompt_cache_key,
+                    on_token,
+                    &started,
+                )
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     // Tokens already emitted on this key — cannot retry without
@@ -404,10 +549,20 @@ impl LlmClient {
             }
             let key = &self.api_keys[key_idx];
             let started = AtomicBool::new(false);
-            match self.call_provider_with_tools_streaming(
-                system, contents, tools, temperature, force_tool_use, key,
-                prompt_cache_key, on_token, &started,
-            ).await {
+            match self
+                .call_provider_with_tools_streaming(
+                    system,
+                    contents,
+                    tools,
+                    temperature,
+                    force_tool_use,
+                    key,
+                    prompt_cache_key,
+                    on_token,
+                    &started,
+                )
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     if started.load(Ordering::Relaxed) {

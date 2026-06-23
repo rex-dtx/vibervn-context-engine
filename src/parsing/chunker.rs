@@ -103,7 +103,10 @@ struct Span {
 /// the text BETWEEN large children (punctuation, braces, blank lines) is still
 /// covered exactly once — guaranteeing full coverage with no gaps and no overlap.
 fn split_node(node: Node, source_len: usize, prefix: &[u32], out: &mut Vec<Span>) {
-    let _g = match recursion_guard::RecursionGuard::enter() { Some(g) => g, None => return };
+    let _g = match recursion_guard::RecursionGuard::enter() {
+        Some(g) => g,
+        None => return,
+    };
     let node_start = node.start_byte();
     let node_end = node.end_byte().min(source_len);
     if node_start >= node_end {
@@ -112,7 +115,10 @@ fn split_node(node: Node, source_len: usize, prefix: &[u32], out: &mut Vec<Span>
 
     // Leaf or small-enough node: emit whole.
     if nonws(prefix, node_start, node_end) <= MAX_CHUNK_NONWS || node.named_child_count() == 0 {
-        out.push(Span { start: node_start, end: node_end });
+        out.push(Span {
+            start: node_start,
+            end: node_end,
+        });
         return;
     }
 
@@ -136,10 +142,16 @@ fn split_node(node: Node, source_len: usize, prefix: &[u32], out: &mut Vec<Span>
             // This child alone is too big: flush the accumulator (including any
             // gap text up to the child), then recurse into the child.
             if let Some(a) = acc.take() {
-                out.push(Span { start: a.start, end: seg_start.max(a.end).min(c_start) });
+                out.push(Span {
+                    start: a.start,
+                    end: seg_start.max(a.end).min(c_start),
+                });
             } else if seg_start < c_start {
                 // Gap text with no accumulator — emit it so coverage is complete.
-                out.push(Span { start: seg_start, end: c_start });
+                out.push(Span {
+                    start: seg_start,
+                    end: c_start,
+                });
             }
             split_node(child, source_len, prefix, out);
             cursor_pos = c_end;
@@ -149,13 +161,24 @@ fn split_node(node: Node, source_len: usize, prefix: &[u32], out: &mut Vec<Span>
         // Small child: try to extend the accumulator; if adding it would bust the
         // budget, flush and start a new accumulator at the gap boundary.
         match acc {
-            None => acc = Some(Span { start: seg_start, end: c_end }),
+            None => {
+                acc = Some(Span {
+                    start: seg_start,
+                    end: c_end,
+                })
+            }
             Some(a) => {
                 if nonws(prefix, a.start, c_end) <= MAX_CHUNK_NONWS {
-                    acc = Some(Span { start: a.start, end: c_end });
+                    acc = Some(Span {
+                        start: a.start,
+                        end: c_end,
+                    });
                 } else {
                     out.push(a);
-                    acc = Some(Span { start: a.end, end: c_end });
+                    acc = Some(Span {
+                        start: a.end,
+                        end: c_end,
+                    });
                 }
             }
         }
@@ -163,9 +186,15 @@ fn split_node(node: Node, source_len: usize, prefix: &[u32], out: &mut Vec<Span>
     }
     // Flush the final accumulator plus any trailing gap up to node_end.
     if let Some(a) = acc {
-        out.push(Span { start: a.start, end: node_end.max(a.end) });
+        out.push(Span {
+            start: a.start,
+            end: node_end.max(a.end),
+        });
     } else if cursor_pos < node_end {
-        out.push(Span { start: cursor_pos, end: node_end });
+        out.push(Span {
+            start: cursor_pos,
+            end: node_end,
+        });
     }
 }
 
@@ -192,7 +221,10 @@ fn merge_spans(mut spans: Vec<Span>, prefix: &[u32]) -> Vec<Span> {
             // Start the next run at the larger of cur.end / s.start so we never
             // overlap the chunk just pushed (a forced split boundary may leave
             // s.start < cur.end after recursion).
-            cur = Span { start: cur.end.max(s.start), end: s.end.max(cur.end) };
+            cur = Span {
+                start: cur.end.max(s.start),
+                end: s.end.max(cur.end),
+            };
         }
     }
     merged.push(cur);
@@ -242,12 +274,7 @@ fn symbol_ref_for(ls: u32, le: u32, symbols: &[Symbol]) -> Option<String> {
 /// flat strategy (one full-body chunk per symbol PLUS a 50/25 sliding window)
 /// is gone — it duplicated container bodies and emitted windows that straddled
 /// function boundaries (the `pipeline.rs#L2026-2075` cut-through defect).
-pub fn chunk_file_ast(
-    file: &str,
-    source: &str,
-    root: Node,
-    symbols: &[Symbol],
-) -> Vec<Chunk> {
+pub fn chunk_file_ast(file: &str, source: &str, root: Node, symbols: &[Symbol]) -> Vec<Chunk> {
     if source.is_empty() {
         return vec![];
     }
@@ -287,8 +314,15 @@ pub fn chunk_file(file: &str, source: &str, symbols: &[Symbol]) -> Vec<Chunk> {
             }
             j += 1;
         }
-        let span_end = if j + 1 < n_lines { line_starts[j + 1] } else { source.len() };
-        spans.push(Span { start: span_start, end: span_end });
+        let span_end = if j + 1 < n_lines {
+            line_starts[j + 1]
+        } else {
+            source.len()
+        };
+        spans.push(Span {
+            start: span_start,
+            end: span_end,
+        });
         i = j + 1;
     }
 
@@ -388,7 +422,11 @@ mod tests {
     fn blank_file_yields_no_chunks() {
         let source = "\n   \n\t\n\n";
         let chunks = chunk_cpp("empty.cpp", source, &[]);
-        assert!(chunks.is_empty(), "expected no chunks, got {}", chunks.len());
+        assert!(
+            chunks.is_empty(),
+            "expected no chunks, got {}",
+            chunks.len()
+        );
     }
 
     #[test]
@@ -462,7 +500,11 @@ mod tests {
         }
         body.push_str("}\n");
         let chunks = chunk_cpp("big.cpp", &body, &[]);
-        assert!(chunks.len() > 1, "oversized fn must split, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "oversized fn must split, got {}",
+            chunks.len()
+        );
         for c in &chunks {
             let nws = c.content.chars().filter(|ch| !ch.is_whitespace()).count();
             // Allow a single oversized leaf to exceed, but statement-level split
@@ -523,7 +565,10 @@ mod tests {
         let chunks = chunk_cpp("two.cpp", source, &[sa, sb]);
         // They should merge into a single chunk covering both.
         let merged = chunks.iter().find(|c| c.line_start <= 1 && c.line_end >= 2);
-        assert!(merged.is_some(), "expected a merged chunk covering both fns");
+        assert!(
+            merged.is_some(),
+            "expected a merged chunk covering both fns"
+        );
         assert_eq!(
             merged.unwrap().symbol_ref,
             None,
@@ -541,10 +586,7 @@ mod tests {
         method.kind = SymbolKind::Method;
         let syms = vec![class_sym, method];
         // Chunk fully inside the method → deepest = draw.
-        assert_eq!(
-            symbol_ref_for(6, 9, &syms).as_deref(),
-            Some("c.cpp::draw")
-        );
+        assert_eq!(symbol_ref_for(6, 9, &syms).as_deref(), Some("c.cpp::draw"));
         // Chunk that is the class declaration line (outside the method) → only the
         // class contains it → container FQN.
         assert_eq!(

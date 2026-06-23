@@ -57,7 +57,10 @@ const READ_MAX_BYTES: usize = 64 * 1024;
 /// real filesystem, so a symlink pointing outside the repo is caught too. The
 /// file must exist (canonicalize requires it) — callers treat a missing file as
 /// a normal "not found" error, which is the right outcome for the agent.
-pub fn resolve_within_root(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, String> {
+pub fn resolve_within_root(
+    root: &std::path::Path,
+    rel: &str,
+) -> Result<std::path::PathBuf, String> {
     let rel = rel.trim();
     if rel.is_empty() {
         return Err("Error: file_path is required.".to_owned());
@@ -66,13 +69,17 @@ pub fn resolve_within_root(root: &std::path::Path, rel: &str) -> Result<std::pat
     // Absolute paths (incl. Windows `C:\..` and UNC) are never allowed — the
     // model addresses files relative to the repo root only.
     if candidate.is_absolute() {
-        return Err(format!("Error: path must be relative to the repo root, got absolute: {rel}"));
+        return Err(format!(
+            "Error: path must be relative to the repo root, got absolute: {rel}"
+        ));
     }
     // Reject Windows drive-relative / verbatim prefixes defensively; on unix this
     // is a no-op. `is_absolute` misses `C:foo` (drive-relative), so also bail if
     // any component looks like a drive/prefix.
     if rel.contains(':') {
-        return Err(format!("Error: path must be relative to the repo root: {rel}"));
+        return Err(format!(
+            "Error: path must be relative to the repo root: {rel}"
+        ));
     }
 
     let joined = root.join(candidate);
@@ -139,8 +146,15 @@ pub fn run_grep(
 ) -> GrepOutcome {
     // Build the regex. `literal` escapes metacharacters so the model can search
     // for `foo(bar)` without crafting a regex; `ignore_case` flips the flag.
-    let effective = if literal { regex::escape(pattern) } else { pattern.to_owned() };
-    let re = match regex::RegexBuilder::new(&effective).case_insensitive(ignore_case).build() {
+    let effective = if literal {
+        regex::escape(pattern)
+    } else {
+        pattern.to_owned()
+    };
+    let re = match regex::RegexBuilder::new(&effective)
+        .case_insensitive(ignore_case)
+        .build()
+    {
         Ok(r) => r,
         Err(e) => return GrepOutcome::err(format!("Error: invalid regex pattern: {e}")),
     };
@@ -204,7 +218,9 @@ pub fn run_grep(
         let path = dent.path();
         // Defense in depth: never read a file that resolves outside the root,
         // even if the walker somehow yielded one (symlinked dir, junction).
-        let Ok(canon) = path.canonicalize() else { continue };
+        let Ok(canon) = path.canonicalize() else {
+            continue;
+        };
         if !canon.starts_with(&canon_root) {
             continue;
         }
@@ -226,11 +242,15 @@ pub fn run_grep(
         if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > GREP_MAX_FILE_BYTES {
             continue;
         }
-        let Ok(bytes) = std::fs::read(path) else { continue };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
         if looks_binary(&bytes) {
             continue;
         }
-        let Ok(text) = String::from_utf8(bytes) else { continue };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
 
         let rel_display = canon.strip_prefix(&canon_root).unwrap_or(&canon);
         let rel_str = rel_display.to_string_lossy().replace('\\', "/");
@@ -300,12 +320,20 @@ pub fn run_grep(
              narrow with a more specific pattern or a `path` scope]\n"
         ));
     }
-    GrepOutcome { text: out, ok: true, regions }
+    GrepOutcome {
+        text: out,
+        ok: true,
+        regions,
+    }
 }
 
 impl GrepOutcome {
     fn err(msg: String) -> Self {
-        GrepOutcome { text: msg, ok: false, regions: Vec::new() }
+        GrepOutcome {
+            text: msg,
+            ok: false,
+            regions: Vec::new(),
+        }
     }
 }
 
@@ -320,7 +348,11 @@ fn push_region(regions: &mut Vec<GrepRegion>, rel_path: &str, lo: u32, hi: u32) 
         last.line_start = last.line_start.min(lo);
         return;
     }
-    regions.push(GrepRegion { rel_path: rel_path.to_owned(), line_start: lo, line_end: hi });
+    regions.push(GrepRegion {
+        rel_path: rel_path.to_owned(),
+        line_start: lo,
+        line_end: hi,
+    });
 }
 
 /// Longest leading directory of a glob with no wildcard, used to anchor the walk
@@ -376,7 +408,9 @@ pub fn run_read(
         Err(e) => return ReadOutcome::err(format!("Error: could not read file: {e}")),
     };
     if looks_binary(&bytes) {
-        return ReadOutcome::err(format!("Error: file appears to be binary, not reading: {file_path}"));
+        return ReadOutcome::err(format!(
+            "Error: file appears to be binary, not reading: {file_path}"
+        ));
     }
     let text = match String::from_utf8(bytes) {
         Ok(t) => t,
@@ -386,7 +420,11 @@ pub fn run_read(
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
     if total == 0 {
-        return ReadOutcome { text: format!("{file_path} is empty (0 lines)."), ok: true, range: None };
+        return ReadOutcome {
+            text: format!("{file_path} is empty (0 lines)."),
+            ok: true,
+            range: None,
+        };
     }
 
     // Clamp the 1-based range into [1, total]. Defaults: whole file (capped).
@@ -425,17 +463,22 @@ pub fn run_read(
             emitted_to + 1
         ));
     }
-    ReadOutcome { text: out, ok: true, range: Some((rel, start as u32, emitted_to as u32)) }
+    ReadOutcome {
+        text: out,
+        ok: true,
+        range: Some((rel, start as u32, emitted_to as u32)),
+    }
 }
 
 impl ReadOutcome {
     fn err(msg: String) -> Self {
-        ReadOutcome { text: msg, ok: false, range: None }
+        ReadOutcome {
+            text: msg,
+            ok: false,
+            range: None,
+        }
     }
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -546,10 +589,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_lines(dir.path(), "big.txt", READ_MAX_LINES + 50);
         let o = run_read(dir.path(), "big.txt", None, None);
-        assert!(o.text.contains(&format!("lines 1-{READ_MAX_LINES} of {}", READ_MAX_LINES + 50)));
+        assert!(o.text.contains(&format!(
+            "lines 1-{READ_MAX_LINES} of {}",
+            READ_MAX_LINES + 50
+        )));
         assert!(o.text.contains("[truncated"));
-        assert!(o.text.contains(&format!("start_line={}", READ_MAX_LINES + 1)));
-        assert_eq!(o.range, Some(("big.txt".to_owned(), 1, READ_MAX_LINES as u32)));
+        assert!(
+            o.text
+                .contains(&format!("start_line={}", READ_MAX_LINES + 1))
+        );
+        assert_eq!(
+            o.range,
+            Some(("big.txt".to_owned(), 1, READ_MAX_LINES as u32))
+        );
     }
 
     #[test]
@@ -576,7 +628,11 @@ mod tests {
     #[test]
     fn grep_finds_literal_and_regex() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.rs"), "fn alpha() {}\nlet x = 1;\nfn beta() {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn alpha() {}\nlet x = 1;\nfn beta() {}\n",
+        )
+        .unwrap();
         let o = run_grep(dir.path(), r"fn \w+", None, false, false, 0);
         assert!(o.ok);
         assert!(o.text.contains("a.rs:1: fn alpha() {}"));
@@ -616,7 +672,14 @@ mod tests {
         assert!(!o.text.contains("one"));
         assert!(!o.text.contains("five"));
         // Region spans the context band [2,4].
-        assert_eq!(o.regions, vec![GrepRegion { rel_path: "a.rs".into(), line_start: 2, line_end: 4 }]);
+        assert_eq!(
+            o.regions,
+            vec![GrepRegion {
+                rel_path: "a.rs".into(),
+                line_start: 2,
+                line_end: 4
+            }]
+        );
     }
 
     #[test]
@@ -644,7 +707,10 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), body).unwrap();
         let o = run_grep(dir.path(), "hit", None, false, false, 0);
         let hits = o.text.matches(":  hit").count() + o.text.matches(": hit").count();
-        assert!(hits <= GREP_MAX_PER_FILE, "per-file cap must bound matches, got {hits}");
+        assert!(
+            hits <= GREP_MAX_PER_FILE,
+            "per-file cap must bound matches, got {hits}"
+        );
         assert!(o.text.contains("per-file cap"));
     }
 
@@ -652,7 +718,11 @@ mod tests {
     fn grep_skips_binary_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "needle\n").unwrap();
-        std::fs::write(dir.path().join("b.bin"), [b'n', b'e', 0x00, b'e', b'd', b'l', b'e']).unwrap();
+        std::fs::write(
+            dir.path().join("b.bin"),
+            [b'n', b'e', 0x00, b'e', b'd', b'l', b'e'],
+        )
+        .unwrap();
         let o = run_grep(dir.path(), "needle", None, false, false, 0);
         assert!(o.text.contains("a.rs:1: needle"));
         assert!(!o.text.contains("b.bin"));
@@ -694,12 +764,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "hit\nhit\nhit\ngap\n").unwrap();
         let o = run_grep(dir.path(), "hit", None, false, false, 0);
-        assert_eq!(o.regions, vec![GrepRegion { rel_path: "a.rs".into(), line_start: 1, line_end: 3 }]);
+        assert_eq!(
+            o.regions,
+            vec![GrepRegion {
+                rel_path: "a.rs".into(),
+                line_start: 1,
+                line_end: 3
+            }]
+        );
     }
 
     #[test]
     fn glob_literal_prefix_extracts_dir() {
-        assert_eq!(glob_literal_prefix("src/foo/**/*.rs"), Some("src/foo".to_owned()));
+        assert_eq!(
+            glob_literal_prefix("src/foo/**/*.rs"),
+            Some("src/foo".to_owned())
+        );
         assert_eq!(glob_literal_prefix("src/*.rs"), Some("src".to_owned()));
         assert_eq!(glob_literal_prefix("*.rs"), None);
     }

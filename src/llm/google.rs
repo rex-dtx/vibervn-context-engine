@@ -39,7 +39,11 @@ enum Part {
         function_call: FunctionCallPart,
         /// Part-level sibling of `functionCall` (Gemini 2.5/3.x thinking). Echoed
         /// back verbatim in history; omitted from the wire when absent.
-        #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none", default)]
+        #[serde(
+            rename = "thoughtSignature",
+            skip_serializing_if = "Option::is_none",
+            default
+        )]
         thought_signature: Option<String>,
     },
     FunctionResponse {
@@ -164,7 +168,11 @@ fn log_cache_metrics(usage: &Option<UsageMetadata>) {
             prompt_tokens = prompt,
             completion_tokens = completion,
             cached_tokens = cached,
-            cache_hit_pct = if prompt > 0 { (cached as f64 / prompt as f64 * 100.0) as u32 } else { 0 },
+            cache_hit_pct = if prompt > 0 {
+                (cached as f64 / prompt as f64 * 100.0) as u32
+            } else {
+                0
+            },
             "gemini cache metrics"
         );
     }
@@ -186,11 +194,15 @@ pub async fn complete(
 
     let body = GeminiRequest {
         system_instruction: SystemInstruction {
-            parts: vec![Part::Text { text: system.to_owned() }],
+            parts: vec![Part::Text {
+                text: system.to_owned(),
+            }],
         },
         contents: vec![Content {
             role: "user".to_owned(),
-            parts: vec![Part::Text { text: user.to_owned() }],
+            parts: vec![Part::Text {
+                text: user.to_owned(),
+            }],
         }],
         generation_config: GenerationConfig {
             temperature,
@@ -208,18 +220,24 @@ pub async fn complete(
         .context("Gemini HTTP request failed")?;
 
     let status = resp.status();
-    let text = resp.text().await.context("failed to read Gemini response body")?;
+    let text = resp
+        .text()
+        .await
+        .context("failed to read Gemini response body")?;
 
     if !status.is_success() {
         bail!("Gemini API returned HTTP {status}: {text}");
     }
 
-    let parsed: GeminiResponse = serde_json::from_str(&text)
-        .with_context(|| {
-            let preview = if text.len() > 512 { &text[..512] } else { &text };
-            warn!(body_preview = %preview, "Gemini response parse failed");
-            "failed to parse Gemini response JSON"
-        })?;
+    let parsed: GeminiResponse = serde_json::from_str(&text).with_context(|| {
+        let preview = if text.len() > 512 {
+            &text[..512]
+        } else {
+            &text
+        };
+        warn!(body_preview = %preview, "Gemini response parse failed");
+        "failed to parse Gemini response JSON"
+    })?;
 
     if let Some(err) = parsed.error {
         bail!("Gemini API error: {}", err.message);
@@ -227,7 +245,8 @@ pub async fn complete(
 
     log_cache_metrics(&parsed.usage_metadata);
 
-    let result_text = parsed.candidates
+    let result_text = parsed
+        .candidates
         .and_then(|c| c.into_iter().next())
         .and_then(|c| c.content)
         .and_then(|c| c.parts.into_iter().next())
@@ -261,55 +280,71 @@ fn build_tool_request(
     temperature: f32,
     force_tool_use: bool,
 ) -> GeminiRequest {
-    let gemini_contents: Vec<Content> = contents.iter().map(|m| match m {
-        super::ChatMessage::User(text) => Content {
-            role: "user".to_owned(),
-            parts: vec![Part::Text { text: text.clone() }],
-        },
-        super::ChatMessage::Model(text) => Content {
-            role: "model".to_owned(),
-            parts: vec![Part::Text { text: text.clone() }],
-        },
-        super::ChatMessage::ModelToolCalls(calls) => Content {
-            role: "model".to_owned(),
-            parts: calls.iter().map(|c| Part::FunctionCall {
-                function_call: FunctionCallPart {
-                    name: c.name.clone(),
-                    id: c.id.clone(),
-                    args: c.args.clone(),
-                },
-                // Echo the signature verbatim — Gemini requires it on replay.
-                thought_signature: c.thought_signature.clone(),
-            }).collect(),
-        },
-        super::ChatMessage::ToolResults(results) => Content {
-            role: "user".to_owned(),
-            parts: results.iter().map(|r| Part::FunctionResponse {
-                function_response: FunctionResponsePart {
-                    name: r.name.clone(),
-                    id: r.id.clone(),
-                    response: serde_json::json!({ "result": &r.content }),
-                },
-            }).collect(),
-        },
-    }).collect();
+    let gemini_contents: Vec<Content> = contents
+        .iter()
+        .map(|m| match m {
+            super::ChatMessage::User(text) => Content {
+                role: "user".to_owned(),
+                parts: vec![Part::Text { text: text.clone() }],
+            },
+            super::ChatMessage::Model(text) => Content {
+                role: "model".to_owned(),
+                parts: vec![Part::Text { text: text.clone() }],
+            },
+            super::ChatMessage::ModelToolCalls(calls) => Content {
+                role: "model".to_owned(),
+                parts: calls
+                    .iter()
+                    .map(|c| Part::FunctionCall {
+                        function_call: FunctionCallPart {
+                            name: c.name.clone(),
+                            id: c.id.clone(),
+                            args: c.args.clone(),
+                        },
+                        // Echo the signature verbatim — Gemini requires it on replay.
+                        thought_signature: c.thought_signature.clone(),
+                    })
+                    .collect(),
+            },
+            super::ChatMessage::ToolResults(results) => Content {
+                role: "user".to_owned(),
+                parts: results
+                    .iter()
+                    .map(|r| Part::FunctionResponse {
+                        function_response: FunctionResponsePart {
+                            name: r.name.clone(),
+                            id: r.id.clone(),
+                            response: serde_json::json!({ "result": &r.content }),
+                        },
+                    })
+                    .collect(),
+            },
+        })
+        .collect();
 
-    let declarations: Vec<FunctionDeclaration> = tools.iter().map(|t| FunctionDeclaration {
-        name: t.name.clone(),
-        description: t.description.clone(),
-        parameters: t.parameters.clone(),
-    }).collect();
+    let declarations: Vec<FunctionDeclaration> = tools
+        .iter()
+        .map(|t| FunctionDeclaration {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            parameters: t.parameters.clone(),
+        })
+        .collect();
 
     GeminiRequest {
         system_instruction: SystemInstruction {
-            parts: vec![Part::Text { text: system.to_owned() }],
+            parts: vec![Part::Text {
+                text: system.to_owned(),
+            }],
         },
         contents: gemini_contents,
         generation_config: GenerationConfig {
             temperature,
             response_mime_type: None,
         },
-        tools: Some(vec![ToolsBlock { function_declarations: declarations }]),
+        tools: Some(vec![ToolsBlock {
+            function_declarations: declarations,
+        }]),
         tool_config: Some(ToolConfig {
             function_calling_config: FunctionCallingConfig {
                 // ANY = the model MUST call a function (cannot answer with prose);
@@ -350,18 +385,24 @@ pub async fn complete_with_tools(
         .context("Gemini tool-calling HTTP request failed")?;
 
     let status = resp.status();
-    let text = resp.text().await.context("failed to read Gemini response body")?;
+    let text = resp
+        .text()
+        .await
+        .context("failed to read Gemini response body")?;
 
     if !status.is_success() {
         bail!("Gemini API returned HTTP {status}: {text}");
     }
 
-    let parsed: GeminiResponse = serde_json::from_str(&text)
-        .with_context(|| {
-            let preview = if text.len() > 512 { &text[..512] } else { &text };
-            warn!(body_preview = %preview, "Gemini tool-call response parse failed");
-            "failed to parse Gemini response JSON"
-        })?;
+    let parsed: GeminiResponse = serde_json::from_str(&text).with_context(|| {
+        let preview = if text.len() > 512 {
+            &text[..512]
+        } else {
+            &text
+        };
+        warn!(body_preview = %preview, "Gemini tool-call response parse failed");
+        "failed to parse Gemini response JSON"
+    })?;
 
     if let Some(err) = parsed.error {
         bail!("Gemini API error: {}", err.message);
@@ -369,7 +410,8 @@ pub async fn complete_with_tools(
 
     log_cache_metrics(&parsed.usage_metadata);
 
-    let parts = parsed.candidates
+    let parts = parsed
+        .candidates
         .and_then(|c| c.into_iter().next())
         .and_then(|c| c.content)
         .map(|c| c.parts)
@@ -415,8 +457,8 @@ pub async fn complete_with_tools_streaming(
     on_token: &super::TokenSink<'_>,
     started: &std::sync::atomic::AtomicBool,
 ) -> Result<ToolTurnResult> {
-    use std::sync::atomic::Ordering;
     use futures::StreamExt;
+    use std::sync::atomic::Ordering;
 
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
@@ -425,12 +467,7 @@ pub async fn complete_with_tools_streaming(
 
     let body = build_tool_request(system, contents, tools, temperature, force_tool_use);
 
-    let resp = match http
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-    {
+    let resp = match http.post(&url).json(&body).send().await {
         Ok(r) => r,
         Err(e) => {
             // NOTE: never log `url` — it carries the API key as a query param.
@@ -484,7 +521,9 @@ pub async fn complete_with_tools_streaming(
             buf.drain(..pos + 2);
             for line in frame.lines() {
                 let line = line.trim_start();
-                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
                 let data = data.trim();
                 if data.is_empty() {
                     continue;
@@ -501,7 +540,8 @@ pub async fn complete_with_tools_streaming(
                     );
                     bail!("Gemini API error: {}", err.message);
                 }
-                let parts = parsed.candidates
+                let parts = parsed
+                    .candidates
                     .and_then(|c| c.into_iter().next())
                     .and_then(|c| c.content)
                     .map(|c| c.parts)
@@ -570,7 +610,10 @@ mod tests {
             thought_signature: Some("sig-xyz".to_owned()),
         };
         let v = serde_json::to_value(&part).expect("serialize");
-        assert_eq!(v.get("thoughtSignature").and_then(|s| s.as_str()), Some("sig-xyz"));
+        assert_eq!(
+            v.get("thoughtSignature").and_then(|s| s.as_str()),
+            Some("sig-xyz")
+        );
         assert!(v.get("functionCall").is_some());
     }
 
@@ -587,7 +630,10 @@ mod tests {
             thought_signature: None,
         };
         let v = serde_json::to_value(&part).expect("serialize");
-        assert!(v.get("thoughtSignature").is_none(), "absent signature must not appear on the wire");
+        assert!(
+            v.get("thoughtSignature").is_none(),
+            "absent signature must not appear on the wire"
+        );
     }
 
     /// End-to-end of the type bridge: a parsed `GeminiToolCall` with a signature
@@ -604,16 +650,23 @@ mod tests {
         let sig = part.thought_signature;
 
         // Rebuild the request part exactly as complete_with_tools does.
-        let echoed = Part::FunctionCall { function_call: fc, thought_signature: sig };
+        let echoed = Part::FunctionCall {
+            function_call: fc,
+            thought_signature: sig,
+        };
         let v = serde_json::to_value(&echoed).expect("serialize");
-        assert_eq!(v.get("thoughtSignature").and_then(|s| s.as_str()), Some("ROUND-TRIP"));
+        assert_eq!(
+            v.get("thoughtSignature").and_then(|s| s.as_str()),
+            Some("ROUND-TRIP")
+        );
     }
 
     #[test]
     fn candidate_without_content_parses() {
         let json = r#"{"candidates":[{"finishReason":"SAFETY"}]}"#;
         let resp: GeminiResponse = serde_json::from_str(json).expect("parse");
-        let parts = resp.candidates
+        let parts = resp
+            .candidates
             .and_then(|c| c.into_iter().next())
             .and_then(|c| c.content)
             .map(|c| c.parts)
@@ -625,7 +678,8 @@ mod tests {
     fn content_with_null_parts_parses() {
         let json = r#"{"candidates":[{"content":{"parts":null,"role":"model"}}]}"#;
         let resp: GeminiResponse = serde_json::from_str(json).expect("parse");
-        let parts = resp.candidates
+        let parts = resp
+            .candidates
             .and_then(|c| c.into_iter().next())
             .and_then(|c| c.content)
             .map(|c| c.parts)
@@ -679,7 +733,8 @@ mod tests {
         let json = r#"{"candidates": [{"content": {"parts": [{"text": "hi"}], "role": "model"}}]}"#;
         let resp: GeminiResponse = serde_json::from_str(json).expect("parse");
         assert!(resp.usage_metadata.is_none());
-        let text = resp.candidates
+        let text = resp
+            .candidates
             .and_then(|c| c.into_iter().next())
             .and_then(|c| c.content)
             .and_then(|c| c.parts.into_iter().next())

@@ -43,7 +43,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-use context_engine_rs::engine_boot::{boot_engine, BootOptions, BootedEngine};
+use context_engine_rs::engine_boot::{BootOptions, BootedEngine, boot_engine};
 use context_engine_rs::engine_ops;
 use context_engine_rs::indexing::IndexState;
 use context_engine_rs::store;
@@ -152,7 +152,10 @@ struct RestoreGuard {
 
 impl RestoreGuard {
     fn new(originals: Vec<(String, u64)>) -> Self {
-        Self { originals, restored: false }
+        Self {
+            originals,
+            restored: false,
+        }
     }
 
     /// Truncate each file back to its original length. Idempotent; sets a flag so
@@ -269,10 +272,14 @@ async fn run() -> i32 {
     index_engine.register_repo_no_watcher(&repo).await;
 
     // ── Step A: clean full rebuild (SETUP — not measured). ───────────────────
-    eprintln!("[step A] clean full rebuild (remove_index + trigger_rebuild) — SETUP, not measured...");
+    eprintln!(
+        "[step A] clean full rebuild (remove_index + trigger_rebuild) — SETUP, not measured..."
+    );
     let pre_rebuild = index_engine.repo_status(&repo).await;
     let pre_rebuild_indexed = pre_rebuild.as_ref().and_then(|s| s.last_indexed_at);
-    match engine_ops::remove_index(&home_dir, &data_dir, &index_engine, &settings, &repo, false).await {
+    match engine_ops::remove_index(&home_dir, &data_dir, &index_engine, &settings, &repo, false)
+        .await
+    {
         Ok(_) => {}
         Err(e) => {
             let detail = format!("{e:#}");
@@ -291,7 +298,10 @@ async fn run() -> i32 {
     if let Some(code) = wait_for_index(&index_engine, &repo, pre_rebuild_indexed, &data_dir).await {
         return code;
     }
-    eprintln!("[step A] full rebuild complete in {:.1}s", rebuild_start.elapsed().as_secs_f64());
+    eprintln!(
+        "[step A] full rebuild complete in {:.1}s",
+        rebuild_start.elapsed().as_secs_f64()
+    );
 
     // ── Step A.5: DRAIN the post-rebuild background cache recompute. ──────────
     // The full rebuild schedules a DEBOUNCED, single-flight graph/stats cache
@@ -318,7 +328,10 @@ async fn run() -> i32 {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    eprintln!("[step A.5] recompute idle after {:.1}s — connection is free", drain_start.elapsed().as_secs_f64());
+    eprintln!(
+        "[step A.5] recompute idle after {:.1}s — connection is free",
+        drain_start.elapsed().as_secs_f64()
+    );
 
     // ── Step B: pick N real indexed files, append a sentinel, record orig len. ─
     // Open the repo's REAL on-disk DB through the gated one-handle-per-repo API
@@ -398,7 +411,8 @@ async fn run() -> i32 {
     }
     eprintln!(
         "[step B] applied {:?} edit to {} file(s); recorded original bytes for restore",
-        cli.edit_kind, picked.len()
+        cli.edit_kind,
+        picked.len()
     );
 
     // ── Step C: ONE manual incremental index (NOT rebuild). Capture stats. ────
@@ -482,7 +496,9 @@ async fn run() -> i32 {
     // The incremental MUST have done real work. If every stage is 0 AND the
     // resolve set is empty, the touch didn't register (no-op) — harness failure.
     if total_ms == 0 && perf.incr_resolve_set_size == 0 {
-        eprintln!("FAIL: incremental run did no measurable work (no-op) — sentinel append did not register as a change.");
+        eprintln!(
+            "FAIL: incremental run did no measurable work (no-op) — sentinel append did not register as a change."
+        );
         return 5;
     }
 
@@ -529,7 +545,9 @@ async fn wait_for_index(
                 }
                 IndexState::Indexing => {}
                 IndexState::Error => {
-                    let detail = s.error.unwrap_or_else(|| "unknown indexing error".to_string());
+                    let detail = s
+                        .error
+                        .unwrap_or_else(|| "unknown indexing error".to_string());
                     if looks_like_lock_conflict(&detail) {
                         return Some(lock_conflict_guidance(data_dir, &detail));
                     }

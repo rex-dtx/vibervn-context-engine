@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -207,16 +207,24 @@ impl VoyageClient {
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
             let key = &self.inner.api_keys[key_idx];
-            match self.try_embed_query_with_key(key, &texts, InputType::Query).await {
+            match self
+                .try_embed_query_with_key(key, &texts, InputType::Query)
+                .await
+            {
                 Ok(mut embeddings) => {
                     return embeddings
                         .pop()
                         .ok_or_else(|| anyhow::anyhow!("VoyageAI returned empty embeddings"));
                 }
                 Err(EmbedError::RateLimited) => {
-                    warn!(key_index = key_idx, "VoyageAI 429 on query embed — trying next key");
+                    warn!(
+                        key_index = key_idx,
+                        "VoyageAI 429 on query embed — trying next key"
+                    );
                 }
-                Err(EmbedError::Transient(e)) => return Err(e.context("VoyageAI transient error on query embed")),
+                Err(EmbedError::Transient(e)) => {
+                    return Err(e.context("VoyageAI transient error on query embed"));
+                }
                 Err(EmbedError::Other(e)) => return Err(e),
             }
         }
@@ -224,20 +232,28 @@ impl VoyageClient {
         // All keys 429 — one backoff attempt (2 s with jitter), then return Err.
         let cursor_val = self.inner.key_cursor.load(Ordering::Relaxed);
         let delay = backoff_with_jitter(2, cursor_val);
-        warn!(delay_ms = delay.as_millis() as u64, "all VoyageAI keys rate-limited on query embed; backing off");
+        warn!(
+            delay_ms = delay.as_millis() as u64,
+            "all VoyageAI keys rate-limited on query embed; backing off"
+        );
         tokio::time::sleep(delay).await;
 
         for offset in 0..n_keys {
             let key_idx = (start_cursor + offset) % n_keys;
             let key = &self.inner.api_keys[key_idx];
-            match self.try_embed_query_with_key(key, &texts, InputType::Query).await {
+            match self
+                .try_embed_query_with_key(key, &texts, InputType::Query)
+                .await
+            {
                 Ok(mut embeddings) => {
                     return embeddings
                         .pop()
                         .ok_or_else(|| anyhow::anyhow!("VoyageAI returned empty embeddings"));
                 }
                 Err(EmbedError::RateLimited) => continue,
-                Err(EmbedError::Transient(e)) => return Err(e.context("VoyageAI transient error on query embed")),
+                Err(EmbedError::Transient(e)) => {
+                    return Err(e.context("VoyageAI transient error on query embed"));
+                }
                 Err(EmbedError::Other(e)) => return Err(e),
             }
         }
@@ -266,7 +282,11 @@ impl VoyageClient {
     ///   then propagate error — the file is left un-embedded and will be retried on
     ///   next index trigger via file_meta crash-safety.
     /// - Other errors: abort immediately.
-    pub async fn embed_batch(&self, texts: &[String], input_type: InputType) -> Result<Vec<Vec<f32>>> {
+    pub async fn embed_batch(
+        &self,
+        texts: &[String],
+        input_type: InputType,
+    ) -> Result<Vec<Vec<f32>>> {
         let n_keys = self.inner.api_keys.len();
         let mut transient_attempts: usize = 0;
 
@@ -330,7 +350,8 @@ impl VoyageClient {
                     );
                     tokio::time::sleep(delay).await;
 
-                    let retry_cursor = self.inner.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
+                    let retry_cursor =
+                        self.inner.key_cursor.fetch_add(1, Ordering::Relaxed) % n_keys;
                     for offset in 0..n_keys {
                         let key_idx = (retry_cursor + offset) % n_keys;
                         let key = &self.inner.api_keys[key_idx];
@@ -367,7 +388,8 @@ impl VoyageClient {
         texts: &[String],
         input_type: InputType,
     ) -> std::result::Result<Vec<Vec<f32>>, EmbedError> {
-        self.try_embed_with_key_using(&self.inner.http, key, texts, input_type).await
+        self.try_embed_with_key_using(&self.inner.http, key, texts, input_type)
+            .await
     }
 
     async fn try_embed_query_with_key(
@@ -376,7 +398,8 @@ impl VoyageClient {
         texts: &[String],
         input_type: InputType,
     ) -> std::result::Result<Vec<Vec<f32>>, EmbedError> {
-        self.try_embed_with_key_using(&self.inner.query_http, key, texts, input_type).await
+        self.try_embed_with_key_using(&self.inner.query_http, key, texts, input_type)
+            .await
     }
 
     async fn try_embed_with_key_using(
@@ -441,24 +464,21 @@ impl VoyageClient {
             )));
         }
 
-        let resp: EmbedResponse = response
-            .json()
-            .await
-            .map_err(|e| {
-                // At this point the HTTP status was verified as 2xx, so any error here
-                // is a body-read/decode failure: stream interrupted mid-transfer, partial
-                // JSON, connection reset during chunked encoding, decode timeout, etc.
-                // ALL of these are transient — the server accepted the request and began
-                // a valid response, but transport broke before we got the full body.
-                // Retrying will get the embeddings fresh.
-                //
-                // History: a body-read timeout and a mid-stream connection reset both
-                // aborted a 79K-file Linux kernel rebuild. The correct rule: if no
-                // complete, parseable response body was received from a 2xx response,
-                // it's transient. Fatal errors are exclusively HTTP error statuses
-                // (handled above) where the server explicitly rejected the request.
-                EmbedError::Transient(e.into())
-            })?;
+        let resp: EmbedResponse = response.json().await.map_err(|e| {
+            // At this point the HTTP status was verified as 2xx, so any error here
+            // is a body-read/decode failure: stream interrupted mid-transfer, partial
+            // JSON, connection reset during chunked encoding, decode timeout, etc.
+            // ALL of these are transient — the server accepted the request and began
+            // a valid response, but transport broke before we got the full body.
+            // Retrying will get the embeddings fresh.
+            //
+            // History: a body-read timeout and a mid-stream connection reset both
+            // aborted a 79K-file Linux kernel rebuild. The correct rule: if no
+            // complete, parseable response body was received from a 2xx response,
+            // it's transient. Fatal errors are exclusively HTTP error statuses
+            // (handled above) where the server explicitly rejected the request.
+            EmbedError::Transient(e.into())
+        })?;
 
         Ok(resp.data.into_iter().map(|d| d.embedding).collect())
     }
@@ -639,7 +659,10 @@ mod tests {
     fn openai_url_default_when_none_or_blank() {
         assert_eq!(embedding_url(Provider::OpenAI, None), OPENAI_ENDPOINT);
         assert_eq!(embedding_url(Provider::OpenAI, Some("")), OPENAI_ENDPOINT);
-        assert_eq!(embedding_url(Provider::OpenAI, Some("   ")), OPENAI_ENDPOINT);
+        assert_eq!(
+            embedding_url(Provider::OpenAI, Some("   ")),
+            OPENAI_ENDPOINT
+        );
     }
 
     #[test]
@@ -660,7 +683,10 @@ mod tests {
             "https://gateway.local/v1/embeddings"
         );
         assert_eq!(
-            embedding_url(Provider::OpenAI, Some("https://gateway.local/v1/embeddings")),
+            embedding_url(
+                Provider::OpenAI,
+                Some("https://gateway.local/v1/embeddings")
+            ),
             "https://gateway.local/v1/embeddings"
         );
     }
@@ -678,7 +704,11 @@ mod tests {
 
     // ── Per-provider request body field set ─────────────────────────────────
 
-    fn serialize_body(provider: Provider, input_type: InputType, dimensions: Option<u32>) -> serde_json::Value {
+    fn serialize_body(
+        provider: Provider,
+        input_type: InputType,
+        dimensions: Option<u32>,
+    ) -> serde_json::Value {
         let texts = vec!["hi".to_string()];
         let (input_type_field, dimensions_field) = match provider {
             Provider::Voyage => (Some(input_type.as_str()), None),
@@ -697,30 +727,60 @@ mod tests {
     fn voyage_body_includes_input_type_omits_dimensions() {
         let v = serialize_body(Provider::Voyage, InputType::Document, Some(512));
         let obj = v.as_object().expect("object");
-        assert_eq!(obj.get("input_type").and_then(|x| x.as_str()), Some("document"));
-        assert!(!obj.contains_key("dimensions"), "Voyage must never send dimensions");
+        assert_eq!(
+            obj.get("input_type").and_then(|x| x.as_str()),
+            Some("document")
+        );
+        assert!(
+            !obj.contains_key("dimensions"),
+            "Voyage must never send dimensions"
+        );
         // Exact field set: model, input, input_type.
-        assert_eq!(obj.len(), 3, "Voyage body fields: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(
+            obj.len(),
+            3,
+            "Voyage body fields: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn openai_body_omits_input_type_and_dimensions_when_unset() {
         let v = serialize_body(Provider::OpenAI, InputType::Document, None);
         let obj = v.as_object().expect("object");
-        assert!(!obj.contains_key("input_type"), "OpenAI must omit input_type");
-        assert!(!obj.contains_key("dimensions"), "OpenAI must omit dimensions when unset");
+        assert!(
+            !obj.contains_key("input_type"),
+            "OpenAI must omit input_type"
+        );
+        assert!(
+            !obj.contains_key("dimensions"),
+            "OpenAI must omit dimensions when unset"
+        );
         // Exact field set: model, input.
-        assert_eq!(obj.len(), 2, "OpenAI body fields: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(
+            obj.len(),
+            2,
+            "OpenAI body fields: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn openai_body_includes_dimensions_when_set() {
         let v = serialize_body(Provider::OpenAI, InputType::Query, Some(256));
         let obj = v.as_object().expect("object");
-        assert!(!obj.contains_key("input_type"), "OpenAI must omit input_type");
+        assert!(
+            !obj.contains_key("input_type"),
+            "OpenAI must omit input_type"
+        );
         assert_eq!(obj.get("dimensions").and_then(|x| x.as_u64()), Some(256));
         // Exact field set: model, input, dimensions.
-        assert_eq!(obj.len(), 3, "OpenAI body fields: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(
+            obj.len(),
+            3,
+            "OpenAI body fields: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -78,7 +78,8 @@ pub fn write_new_generation(
     let root = repo_shard_root(data_dir, repo);
     let next = read_current_gen(&root).map(|g| g + 1).unwrap_or(0);
     let generation_dir = root.join(next.to_string());
-    std::fs::create_dir_all(&generation_dir).with_context(|| format!("create generation dir {generation_dir:?}"))?;
+    std::fs::create_dir_all(&generation_dir)
+        .with_context(|| format!("create generation dir {generation_dir:?}"))?;
 
     let (emb, ids, dim) = index.raw_parts();
     let count = ids.len() as u64;
@@ -97,7 +98,8 @@ pub fn write_new_generation(
         header[24..32].copy_from_slice(&content_stamp.to_le_bytes());
         f.write_all(&header).context("write header")?;
         // f32 payload (already L2-normalized, row-major).
-        f.write_all(bytemuck::cast_slice(emb)).context("write f32 payload")?;
+        f.write_all(bytemuck::cast_slice(emb))
+            .context("write f32 payload")?;
         f.flush().ok();
         f.sync_all().context("fsync shard.f32")?;
     }
@@ -139,7 +141,9 @@ pub fn open_current(
     expected_stamp: u64,
 ) -> Result<Option<(VectorIndex, u64)>> {
     let root = repo_shard_root(data_dir, repo);
-    let Some(generation) = read_current_gen(&root) else { return Ok(None) };
+    let Some(generation) = read_current_gen(&root) else {
+        return Ok(None);
+    };
     let generation_dir = root.join(generation.to_string());
     let f32_path = generation_dir.join("shard.f32");
     let ids_path = generation_dir.join("shard.ids");
@@ -188,7 +192,9 @@ pub fn open_current(
 
     // Sidecar: decode chunk ids.
     let ids_bytes = std::fs::read(&ids_path).context("read shard.ids")?;
-    let Some(chunk_ids) = decode_ids(&ids_bytes, count) else { return Ok(None) };
+    let Some(chunk_ids) = decode_ids(&ids_bytes, count) else {
+        return Ok(None);
+    };
 
     let index = VectorIndex::from_mmap(map, HEADER_BYTES, f32_len, dim, chunk_ids);
     Ok(Some((index, generation)))
@@ -219,7 +225,11 @@ fn decode_ids(buf: &[u8], expect_count: usize) -> Option<Vec<ChunkId>> {
         p += 4;
         let line_end = u32::from_le_bytes(buf[p..p + 4].try_into().ok()?);
         p += 4;
-        ids.push(ChunkId { file, line_start, line_end });
+        ids.push(ChunkId {
+            file,
+            line_start,
+            line_end,
+        });
     }
     Some(ids)
 }
@@ -232,11 +242,15 @@ fn decode_ids(buf: &[u8], expect_count: usize) -> Option<Vec<ChunkId>> {
 pub fn reap_stale_generations(data_dir: &Path, repo: &str, keep: &[u64]) {
     let root = repo_shard_root(data_dir, repo);
     let current = read_current_gen(&root);
-    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Ok(generation) = name.parse::<u64>() else { continue }; // skip CURRENT, tmp, etc.
+        let Ok(generation) = name.parse::<u64>() else {
+            continue;
+        }; // skip CURRENT, tmp, etc.
         if Some(generation) == current || keep.contains(&generation) {
             continue;
         }
@@ -255,7 +269,14 @@ mod tests {
         let pairs: Vec<(ChunkId, Vec<f32>)> = (0..n)
             .map(|i| {
                 let emb: Vec<f32> = (0..dim).map(|j| ((i * 7 + j) % 13) as f32 - 6.0).collect();
-                (ChunkId { file: format!("/r/f{}.rs", i), line_start: i as u32, line_end: i as u32 + 5 }, emb)
+                (
+                    ChunkId {
+                        file: format!("/r/f{}.rs", i),
+                        line_start: i as u32,
+                        line_end: i as u32 + 5,
+                    },
+                    emb,
+                )
             })
             .collect();
         vi.insert(&pairs);
@@ -272,7 +293,9 @@ mod tests {
         let g = write_new_generation(tmp.path(), repo, &ram, 200).unwrap();
         assert_eq!(g, 0);
 
-        let (mapped, gen_read) = open_current(tmp.path(), repo, 64, 200).unwrap().expect("opens");
+        let (mapped, gen_read) = open_current(tmp.path(), repo, 64, 200)
+            .unwrap()
+            .expect("opens");
         assert_eq!(gen_read, 0);
         assert!(mapped.is_mmap(), "opened shard must be mmap-backed");
         assert_eq!(mapped.len(), ram.len());
@@ -301,9 +324,15 @@ mod tests {
         write_new_generation(tmp.path(), repo, &ram, 100).unwrap();
         let (mapped, _) = open_current(tmp.path(), repo, 64, 100).unwrap().unwrap();
         let map_bytes = mapped.byte_size();
-        assert!(map_bytes < payload, "mmap byte_size excludes the f32 payload ({map_bytes} < {payload})");
+        assert!(
+            map_bytes < payload,
+            "mmap byte_size excludes the f32 payload ({map_bytes} < {payload})"
+        );
         // Sidecar is the only heap cost — bounded by id count, not vector dim.
-        assert!(map_bytes > 0, "sidecar still counts (bounds heap + open-handle pressure)");
+        assert!(
+            map_bytes > 0,
+            "sidecar still counts (bounds heap + open-handle pressure)"
+        );
     }
 
     /// Stale stamp → open returns None (forces rebuild).
@@ -326,8 +355,14 @@ mod tests {
         let repo = "/proj/dim";
         let ram = build_index(50, 64);
         write_new_generation(tmp.path(), repo, &ram, 50).unwrap();
-        assert!(open_current(tmp.path(), repo, 128, 50).unwrap().is_none(), "wrong dim rejected");
-        assert!(open_current(tmp.path(), repo, 0, 50).unwrap().is_some(), "dim=0 accepts header dim");
+        assert!(
+            open_current(tmp.path(), repo, 128, 50).unwrap().is_none(),
+            "wrong dim rejected"
+        );
+        assert!(
+            open_current(tmp.path(), repo, 0, 50).unwrap().is_some(),
+            "dim=0 accepts header dim"
+        );
     }
 
     /// Truncated/corrupt shard.f32 → None (self-heal: caller rebuilds).
@@ -345,7 +380,10 @@ mod tests {
         let file = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
         file.set_len(len / 2).unwrap();
         drop(file);
-        assert!(open_current(tmp.path(), repo, 64, 50).unwrap().is_none(), "truncated file rejected");
+        assert!(
+            open_current(tmp.path(), repo, 64, 50).unwrap().is_none(),
+            "truncated file rejected"
+        );
     }
 
     /// Incremental mutation of an MMAP-backed shard must materialize (copy to RAM)
@@ -369,7 +407,14 @@ mod tests {
         assert!(mapped.byte_size() > 0, "now heap-resident (mutable)");
 
         // Insert a new vector — still works on the materialized shard.
-        mapped.insert(&[(ChunkId { file: "/r/new.rs".into(), line_start: 1, line_end: 2 }, vec![0.5f32; 64])]);
+        mapped.insert(&[(
+            ChunkId {
+                file: "/r/new.rs".into(),
+                line_start: 1,
+                line_end: 2,
+            },
+            vec![0.5f32; 64],
+        )]);
         assert_eq!(mapped.len(), before, "one removed, one added");
 
         // Search still returns correct results over the materialized shard.
@@ -381,7 +426,11 @@ mod tests {
     #[test]
     fn missing_current_returns_none() {
         let tmp = TempDir::new().unwrap();
-        assert!(open_current(tmp.path(), "/proj/never", 64, 0).unwrap().is_none());
+        assert!(
+            open_current(tmp.path(), "/proj/never", 64, 0)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A new generation is written to a FRESH dir and CURRENT flips — the old gen's
@@ -399,7 +448,10 @@ mod tests {
         let root = repo_shard_root(tmp.path(), repo);
         // CURRENT now points at g1; gen-0's files still exist (held mapping valid).
         assert_eq!(read_current_gen(&root), Some(g1));
-        assert!(root.join(g0.to_string()).join("shard.f32").exists(), "old gen file intact for in-flight reader");
+        assert!(
+            root.join(g0.to_string()).join("shard.f32").exists(),
+            "old gen file intact for in-flight reader"
+        );
         // The held reader still searches correctly over its (old) mapping.
         let q: Vec<f32> = (0..64).map(|j| (j % 5) as f32).collect();
         assert_eq!(held.search(&q, 5).len(), 5);
@@ -407,7 +459,13 @@ mod tests {
         reap_stale_generations(tmp.path(), repo, &[g0]);
         assert!(root.join(g0.to_string()).exists(), "kept gen survives reap");
         reap_stale_generations(tmp.path(), repo, &[]);
-        assert!(!root.join(g0.to_string()).exists(), "unreferenced old gen reaped");
-        assert!(root.join(g1.to_string()).exists(), "CURRENT gen never reaped");
+        assert!(
+            !root.join(g0.to_string()).exists(),
+            "unreferenced old gen reaped"
+        );
+        assert!(
+            root.join(g1.to_string()).exists(),
+            "CURRENT gen never reaped"
+        );
     }
 }

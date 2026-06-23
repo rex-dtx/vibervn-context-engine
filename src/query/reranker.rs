@@ -1,16 +1,16 @@
+use crate::embedding::voyage::VoyageClient;
+use crate::indexing::IndexEngine;
+use crate::llm::{ChatMessage, LlmClient, ToolDef, ToolResult, ToolTurnResult};
+use crate::query::engine::{QueryGraphMode, read_lines_from_fs, run_sub_query, slice_numbered};
+use crate::query::merger::MergeChunk;
+use regex::Regex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use regex::Regex;
 use surrealdb::Surreal;
 use surrealdb::engine::local::Db;
 use tokio::sync::RwLock;
 use tracing::warn;
-use crate::embedding::voyage::VoyageClient;
-use crate::indexing::IndexEngine;
-use crate::llm::{ChatMessage, LlmClient, ToolDef, ToolResult, ToolTurnResult};
-use crate::query::merger::MergeChunk;
-use crate::query::engine::{run_sub_query, read_lines_from_fs, slice_numbered};
 
 /// A chunk selection: (chunk_index, optional line ranges to keep).
 type ChunkSelection = (usize, Option<Vec<(u32, u32)>>);
@@ -58,15 +58,17 @@ pub async fn rerank(
 
     let client = match llm_client {
         Some(c) => c,
-        None => return RerankOutput {
-            reranked_indices: all_indices,
-            line_selections: vec![None; n],
-            raw_request: String::new(),
-            raw_response: String::new(),
-            elapsed_ms: 0,
-            fallback_used: false,
-            skip_reason: Some("no LLM API key configured".to_owned()),
-        },
+        None => {
+            return RerankOutput {
+                reranked_indices: all_indices,
+                line_selections: vec![None; n],
+                raw_request: String::new(),
+                raw_response: String::new(),
+                elapsed_ms: 0,
+                fallback_used: false,
+                skip_reason: Some("no LLM API key configured".to_owned()),
+            };
+        }
     };
 
     if chunks.is_empty() {
@@ -110,7 +112,9 @@ pub async fn rerank(
     for (i, chunk) in chunks.iter().enumerate() {
         let stats = caller_stats.get(i).copied().flatten();
         let meta_str = match stats {
-            Some((callers, files)) => format!("score={:.2} callers={callers} files={files}", chunk.score),
+            Some((callers, files)) => {
+                format!("score={:.2} callers={callers} files={files}", chunk.score)
+            }
             None => format!("score={:.2}", chunk.score),
         };
         let symbol_display = chunk.symbol.as_deref().unwrap_or("no symbol");
@@ -151,7 +155,8 @@ pub async fn rerank(
 
     match result {
         Ok(response) => {
-            let mut output = parse_rerank_response(&response, chunks, min_prune_lines, elapsed_ms, structured);
+            let mut output =
+                parse_rerank_response(&response, chunks, min_prune_lines, elapsed_ms, structured);
             output.raw_request = raw_request;
             output
         }
@@ -306,12 +311,21 @@ fn agentic_tool_definitions(grep_read: bool) -> Vec<ToolDef> {
 
 /// Estimate byte size of conversation history for cap enforcement.
 fn estimate_history_bytes(messages: &[ChatMessage]) -> usize {
-    messages.iter().map(|m| match m {
-        ChatMessage::User(t) => t.len(),
-        ChatMessage::Model(t) => t.len(),
-        ChatMessage::ModelToolCalls(calls) => calls.iter().map(|c| c.name.len() + c.args.to_string().len() + 50).sum(),
-        ChatMessage::ToolResults(results) => results.iter().map(|r| r.name.len() + r.content.len() + 50).sum(),
-    }).sum()
+    messages
+        .iter()
+        .map(|m| match m {
+            ChatMessage::User(t) => t.len(),
+            ChatMessage::Model(t) => t.len(),
+            ChatMessage::ModelToolCalls(calls) => calls
+                .iter()
+                .map(|c| c.name.len() + c.args.to_string().len() + 50)
+                .sum(),
+            ChatMessage::ToolResults(results) => results
+                .iter()
+                .map(|r| r.name.len() + r.content.len() + 50)
+                .sum(),
+        })
+        .sum()
 }
 
 /// Why the agentic loop stopped. Captured explicitly (not inferred from log
@@ -438,6 +452,7 @@ struct LiveBackend<'a> {
     index_engine: &'a Arc<IndexEngine>,
     repo_dbs: &'a Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     warm_wait: std::time::Duration,
+    graph_mode: QueryGraphMode,
 }
 
 impl AgenticBackend for LiveBackend<'_> {
@@ -448,7 +463,14 @@ impl AgenticBackend for LiveBackend<'_> {
         tools: &[ToolDef],
         force_tool_use: bool,
     ) -> impl std::future::Future<Output = anyhow::Result<ToolTurnResult>> + Send {
-        self.llm_client.complete_with_tools(system, messages, tools, 0.0, force_tool_use, self.prompt_cache_key.as_deref())
+        self.llm_client.complete_with_tools(
+            system,
+            messages,
+            tools,
+            0.0,
+            force_tool_use,
+            self.prompt_cache_key.as_deref(),
+        )
     }
 
     fn sub_query(
@@ -463,6 +485,7 @@ impl AgenticBackend for LiveBackend<'_> {
             self.index_engine,
             self.repo_dbs,
             self.warm_wait,
+            self.graph_mode,
         )
     }
 
@@ -470,7 +493,9 @@ impl AgenticBackend for LiveBackend<'_> {
         // `repo_filter` is the absolute repo root (same value `path_in_repo`
         // gates sub-query results against). Normalize so the fs_tools guard
         // canonicalizes against the canonical root.
-        Some(std::path::PathBuf::from(crate::store::normalize_repo_path(self.repo_filter)))
+        Some(std::path::PathBuf::from(crate::store::normalize_repo_path(
+            self.repo_filter,
+        )))
     }
 }
 
@@ -498,6 +523,7 @@ pub async fn rerank_agentic(
     index_engine: &Arc<IndexEngine>,
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     warm_wait: std::time::Duration,
+    graph_mode: QueryGraphMode,
 ) -> (RerankOutput, ExtendedPool) {
     use std::hash::{Hash, Hasher};
     let cache_key = {
@@ -514,8 +540,20 @@ pub async fn rerank_agentic(
         index_engine,
         repo_dbs,
         warm_wait,
+        graph_mode,
     };
-    run_agentic_loop(&backend, query, chunks, numbered, caller_stats, min_prune_lines, max_turns, max_chunk_chars, grep_read).await
+    run_agentic_loop(
+        &backend,
+        query,
+        chunks,
+        numbered,
+        caller_stats,
+        min_prune_lines,
+        max_turns,
+        max_chunk_chars,
+        grep_read,
+    )
+    .await
 }
 
 /// The real agentic loop: prompt build → turn loop → `decide_final_action` →
@@ -548,7 +586,10 @@ async fn run_agentic_loop<B: AgenticBackend>(
                 fallback_used: false,
                 skip_reason: None,
             },
-            ExtendedPool { chunks: vec![], numbered: vec![] },
+            ExtendedPool {
+                chunks: vec![],
+                numbered: vec![],
+            },
         );
     }
 
@@ -559,7 +600,10 @@ async fn run_agentic_loop<B: AgenticBackend>(
     // and don't consume the query budget). Owned String so the extra block can
     // be appended conditionally; `&system` is passed to the backend below.
     let system: String = if grep_read {
-        format!("{system}\n{}", crate::prompts::RERANK_AGENTIC_SYSTEM_EXACT_TOOLS)
+        format!(
+            "{system}\n{}",
+            crate::prompts::RERANK_AGENTIC_SYSTEM_EXACT_TOOLS
+        )
     } else {
         system.to_owned()
     };
@@ -569,11 +613,16 @@ async fn run_agentic_loop<B: AgenticBackend>(
     for (i, chunk) in chunks.iter().enumerate() {
         let stats = caller_stats.get(i).copied().flatten();
         let meta_str = match stats {
-            Some((callers, files)) => format!("score={:.2} callers={callers} files={files}", chunk.score),
+            Some((callers, files)) => {
+                format!("score={:.2} callers={callers} files={files}", chunk.score)
+            }
             None => format!("score={:.2}", chunk.score),
         };
         let symbol_display = chunk.symbol.as_deref().unwrap_or("no symbol");
-        let raw = numbered.get(i).and_then(|c| c.as_deref()).unwrap_or(&chunk.content);
+        let raw = numbered
+            .get(i)
+            .and_then(|c| c.as_deref())
+            .unwrap_or(&chunk.content);
         let content = truncate_content(raw, 100);
         let entry = format!(
             "[{i}] {meta_str} | {}:{}-{} ({symbol_display})\n{content}",
@@ -648,7 +697,10 @@ async fn run_agentic_loop<B: AgenticBackend>(
         // Enforce byte cap — but always allow at least the first turn so the
         // agent can select from the initial chunks even when the prompt is large.
         if iteration > 0 && estimate_history_bytes(&messages) > AGENTIC_HISTORY_BYTE_CAP {
-            tracing::info!(iteration, "agentic rerank: history byte cap reached, stopping");
+            tracing::info!(
+                iteration,
+                "agentic rerank: history byte cap reached, stopping"
+            );
             exit = LoopExit::ByteCap;
             break;
         }
@@ -658,7 +710,9 @@ async fn run_agentic_loop<B: AgenticBackend>(
         // After query results, model MUST call add_chunks (always forced).
         // After add_chunks with zero queries done, model MUST call query (forced).
         let force_tool_use = !awaiting_query || query_calls == 0;
-        let result = backend.next_turn(&system, &messages, &tools, force_tool_use).await;
+        let result = backend
+            .next_turn(&system, &messages, &tools, force_tool_use)
+            .await;
 
         match result {
             Err(e) => {
@@ -673,8 +727,14 @@ async fn run_agentic_loop<B: AgenticBackend>(
                 break;
             }
             Ok(ToolTurnResult::ToolCalls(calls)) => {
-                raw_response_log.push_str(&format!("[Iter {iteration}] TOOL_CALLS: {}\n",
-                    calls.iter().map(|c| format!("{}({})", c.name, c.args)).collect::<Vec<_>>().join(", ")));
+                raw_response_log.push_str(&format!(
+                    "[Iter {iteration}] TOOL_CALLS: {}\n",
+                    calls
+                        .iter()
+                        .map(|c| format!("{}({})", c.name, c.args))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
 
                 // Record model's tool calls in history
                 messages.push(ChatMessage::ModelToolCalls(calls.clone()));
@@ -773,7 +833,9 @@ async fn run_agentic_loop<B: AgenticBackend>(
                                 });
                                 continue;
                             }
-                            let info_req = call.args.get("information_request")
+                            let info_req = call
+                                .args
+                                .get("information_request")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
                             let result_content = run_query_tool(
@@ -782,7 +844,8 @@ async fn run_agentic_loop<B: AgenticBackend>(
                                 &mut query_cache,
                                 &mut extended_chunks,
                                 &mut extended_numbered,
-                            ).await;
+                            )
+                            .await;
                             // Only count against budget if the query actually ran
                             // (not rejected as duplicate/empty).
                             if !result_content.starts_with("Error:") {
@@ -818,7 +881,10 @@ async fn run_agentic_loop<B: AgenticBackend>(
                             awaiting_query = false;
                             let root = backend.repo_root().expect("checked above");
                             let content = run_grep_tool(
-                                &root, &call.args, &mut extended_chunks, &mut extended_numbered,
+                                &root,
+                                &call.args,
+                                &mut extended_chunks,
+                                &mut extended_numbered,
                             );
                             tool_results.push(ToolResult {
                                 name: "grep".to_owned(),
@@ -830,7 +896,10 @@ async fn run_agentic_loop<B: AgenticBackend>(
                             awaiting_query = false;
                             let root = backend.repo_root().expect("checked above");
                             let content = run_read_tool(
-                                &root, &call.args, &mut extended_chunks, &mut extended_numbered,
+                                &root,
+                                &call.args,
+                                &mut extended_chunks,
+                                &mut extended_numbered,
                             );
                             tool_results.push(ToolResult {
                                 name: "read".to_owned(),
@@ -878,15 +947,13 @@ async fn run_agentic_loop<B: AgenticBackend>(
                             )
                         }
                     } else {
-                        Some(
-                            format!(
-                                "<system-reminder>\n\
+                        Some(format!(
+                            "<system-reminder>\n\
                                  You MUST call `add_chunks` now. ONLY add chunks that are DIRECTLY relevant to the ORIGINAL query: {query_json}\n\
                                  Do NOT add all query results — most will be tangential. Be highly selective. \
                                  Use `lines` to prune chunks to relevant ranges. `keep: \"all\"` only for short chunks where every line matters.\n\
                                  </system-reminder>"
-                            )
-                        )
+                        ))
                     };
                     match nudge {
                         Some(msg) => messages.push(ChatMessage::User(msg)),
@@ -902,7 +969,11 @@ async fn run_agentic_loop<B: AgenticBackend>(
                 // add_chunks, or as a rejection on the next query call).
                 if let Some(reason) = boundary_exit(stop_mid_turn) {
                     tracing::info!(
-                        ?reason, accumulated_chars, char_budget, query_calls, query_budget,
+                        ?reason,
+                        accumulated_chars,
+                        char_budget,
+                        query_calls,
+                        query_budget,
                         "agentic rerank: budget reached, stopping"
                     );
                     exit = reason;
@@ -924,12 +995,22 @@ async fn run_agentic_loop<B: AgenticBackend>(
         messages.push(ChatMessage::User(
             "Search budget is spent and no more queries are allowed. \
              Call add_chunks NOW with every relevant chunk from the results so far. \
-             This is your final action — do not call query.".to_owned(),
+             This is your final action — do not call query."
+                .to_owned(),
         ));
-        match backend.next_turn(&system, &messages, &tools, /*force_tool_use*/ true).await {
+        match backend
+            .next_turn(&system, &messages, &tools, /*force_tool_use*/ true)
+            .await
+        {
             Ok(ToolTurnResult::ToolCalls(calls)) => {
-                raw_response_log.push_str(&format!("[Final harvest] TOOL_CALLS: {}\n",
-                    calls.iter().map(|c| format!("{}({})", c.name, c.args)).collect::<Vec<_>>().join(", ")));
+                raw_response_log.push_str(&format!(
+                    "[Final harvest] TOOL_CALLS: {}\n",
+                    calls
+                        .iter()
+                        .map(|c| format!("{}({})", c.name, c.args))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
                 for call in &calls {
                     // Only add_chunks is honored here; query is explicitly refused
                     // so the harvest turn cannot spend more budget or recurse.
@@ -967,7 +1048,10 @@ async fn run_agentic_loop<B: AgenticBackend>(
     // The pool the agent could address: base candidates + any `query` results.
     // `reranked_indices` (including the Fallback `all_indices`, since the first
     // `n` entries ARE the base chunks) resolve against this uniformly.
-    let pool = ExtendedPool { chunks: extended_chunks, numbered: extended_numbered };
+    let pool = ExtendedPool {
+        chunks: extended_chunks,
+        numbered: extended_numbered,
+    };
 
     match decide_final_action(exit, accumulated.len()) {
         FinalAction::EmptyRelevant => {
@@ -989,8 +1073,12 @@ async fn run_agentic_loop<B: AgenticBackend>(
             let reason = match exit {
                 LoopExit::LlmError => "agentic LLM request failed with no chunks selected",
                 LoopExit::ByteCap => "agentic loop hit history byte cap with no chunks selected",
-                LoopExit::IterationCap => "agentic loop hit its iteration ceiling without selecting chunks",
-                LoopExit::QueryBudget => "agentic loop used its query budget without selecting chunks",
+                LoopExit::IterationCap => {
+                    "agentic loop hit its iteration ceiling without selecting chunks"
+                }
+                LoopExit::QueryBudget => {
+                    "agentic loop used its query budget without selecting chunks"
+                }
                 _ => "agentic loop ended without selecting chunks",
             };
             return (
@@ -1022,7 +1110,8 @@ async fn run_agentic_loop<B: AgenticBackend>(
     }
 
     let reranked_indices: Vec<usize> = deduped.iter().map(|(idx, _)| *idx).collect();
-    let line_selections: Vec<Option<Vec<(u32, u32)>>> = deduped.into_iter().map(|(_, lines)| lines).collect();
+    let line_selections: Vec<Option<Vec<(u32, u32)>>> =
+        deduped.into_iter().map(|(_, lines)| lines).collect();
 
     (
         RerankOutput {
@@ -1053,10 +1142,17 @@ fn handle_add_chunks(
     char_budget: usize,
 ) -> (String, usize) {
     let Some(arr) = args.get("chunks").and_then(|v| v.as_array()) else {
-        return ("Error: `chunks` is required and must be an array of {chunk_index, lines?} objects".to_owned(), 0);
+        return (
+            "Error: `chunks` is required and must be an array of {chunk_index, lines?} objects"
+                .to_owned(),
+            0,
+        );
     };
     if arr.is_empty() {
-        return ("Error: `chunks` array is empty — include at least one {chunk_index} object".to_owned(), 0);
+        return (
+            "Error: `chunks` array is empty — include at least one {chunk_index} object".to_owned(),
+            0,
+        );
     }
 
     let mut lines_out: Vec<String> = Vec::with_capacity(arr.len());
@@ -1068,10 +1164,15 @@ fn handle_add_chunks(
     }
 
     let total_chars = accumulated_chars.saturating_add(added_chars);
-    let remaining = if char_budget > 0 { char_budget.saturating_sub(total_chars) } else { 0 };
+    let remaining = if char_budget > 0 {
+        char_budget.saturating_sub(total_chars)
+    } else {
+        0
+    };
     lines_out.push(format!(
         "--- {}/{} chunks selected, {total_chars}/{char_budget} chars used, {remaining} remaining.",
-        accumulated.len(), chunks.len()
+        accumulated.len(),
+        chunks.len()
     ));
     (lines_out.join("\n"), added_chars)
 }
@@ -1112,11 +1213,22 @@ fn add_one_chunk(
 ) -> (String, usize) {
     let idx = match item.get("chunk_index").and_then(|v| v.as_u64()) {
         Some(i) => i as usize,
-        None => return ("Error: chunk_index is required and must be an integer".to_owned(), 0),
+        None => {
+            return (
+                "Error: chunk_index is required and must be an integer".to_owned(),
+                0,
+            );
+        }
     };
 
     if idx >= chunks.len() {
-        return (format!("Error: chunk_index {idx} out of range (0..{})", chunks.len()), 0);
+        return (
+            format!(
+                "Error: chunk_index {idx} out of range (0..{})",
+                chunks.len()
+            ),
+            0,
+        );
     }
 
     if accumulated.iter().any(|(i, _)| *i == idx) {
@@ -1138,10 +1250,17 @@ fn add_one_chunk(
         }
     };
 
-    let emitted = emitted_chars(chunk, numbered.get(idx).and_then(|n| n.as_deref()), &selection);
+    let emitted = emitted_chars(
+        chunk,
+        numbered.get(idx).and_then(|n| n.as_deref()),
+        &selection,
+    );
     accumulated.push((idx, selection));
     (
-        format!("OK: added chunk {idx} ({}:{}-{})", chunk.file, chunk.line_start, chunk.line_end),
+        format!(
+            "OK: added chunk {idx} ({}:{}-{})",
+            chunk.file, chunk.line_start, chunk.line_end
+        ),
         emitted,
     )
 }
@@ -1150,7 +1269,11 @@ fn add_one_chunk(
 /// chunk. Mirrors that formatting exactly: per-range slices when a line
 /// selection is present and the numbered text is readable; the whole numbered
 /// text otherwise; the stored content as the final fallback.
-fn emitted_chars(chunk: &MergeChunk, numbered_text: Option<&str>, selection: &Option<Vec<(u32, u32)>>) -> usize {
+fn emitted_chars(
+    chunk: &MergeChunk,
+    numbered_text: Option<&str>,
+    selection: &Option<Vec<(u32, u32)>>,
+) -> usize {
     match (numbered_text, selection) {
         (Some(text), Some(ranges)) if !ranges.is_empty() => ranges
             .iter()
@@ -1177,7 +1300,8 @@ async fn run_query_tool<B: AgenticBackend>(
 
     // Reject duplicate queries — force the model to vary its search terms.
     if query_cache.contains_key(information_request) {
-        return "Error: this exact query was already used. Try a different information_request.".to_owned();
+        return "Error: this exact query was already used. Try a different information_request."
+            .to_owned();
     }
 
     match backend.sub_query(information_request).await {
@@ -1190,7 +1314,8 @@ async fn run_query_tool<B: AgenticBackend>(
             let start_idx = extended_chunks.len();
             // Add results to extended pool so add_chunk can reference them
             for chunk in &results {
-                let numbered_text = read_lines_from_fs(&chunk.file, chunk.line_start, chunk.line_end).ok();
+                let numbered_text =
+                    read_lines_from_fs(&chunk.file, chunk.line_start, chunk.line_end).ok();
                 extended_numbered.push(numbered_text);
                 extended_chunks.push(chunk.clone());
             }
@@ -1203,8 +1328,12 @@ async fn run_query_tool<B: AgenticBackend>(
 }
 
 fn format_sub_query_results(results: &[MergeChunk], start_idx: usize) -> String {
-    let mut output = format!("Found {} results (chunk indices {}-{}):\n\n",
-        results.len(), start_idx, start_idx + results.len() - 1);
+    let mut output = format!(
+        "Found {} results (chunk indices {}-{}):\n\n",
+        results.len(),
+        start_idx,
+        start_idx + results.len() - 1
+    );
 
     for (i, chunk) in results.iter().enumerate() {
         let idx = start_idx + i;
@@ -1265,15 +1394,22 @@ fn run_grep_tool(
         return "Error: pattern is required.".to_owned();
     }
     let path = args.get("path").and_then(|v| v.as_str());
-    let literal = args.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
-    let ignore_case = args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false);
+    let literal = args
+        .get("literal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let ignore_case = args
+        .get("ignore_case")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let context_lines = args
         .get("context_lines")
         .and_then(|v| v.as_u64())
         .map(|n| (n as usize).min(crate::fs_tools::GREP_MAX_CONTEXT))
         .unwrap_or(0);
 
-    let outcome = crate::fs_tools::run_grep(root, pattern, path, literal, ignore_case, context_lines);
+    let outcome =
+        crate::fs_tools::run_grep(root, pattern, path, literal, ignore_case, context_lines);
     if !outcome.ok || outcome.regions.is_empty() {
         // Error or no matches — return the message as-is, nothing addressable.
         return outcome.text;
@@ -1283,11 +1419,16 @@ fn run_grep_tool(
     out.push_str("\nAddressable chunks from this grep (pass chunk_index to add_chunks):\n");
     for region in &outcome.regions {
         match synth_pool_chunk(
-            root, &region.rel_path, region.line_start, region.line_end,
-            extended_chunks, extended_numbered,
+            root,
+            &region.rel_path,
+            region.line_start,
+            region.line_end,
+            extended_chunks,
+            extended_numbered,
         ) {
             Some(idx) => out.push_str(&format!(
-                "[{idx}] {}:{}-{}\n", region.rel_path, region.line_start, region.line_end
+                "[{idx}] {}:{}-{}\n",
+                region.rel_path, region.line_start, region.line_end
             )),
             None => continue,
         }
@@ -1307,8 +1448,14 @@ fn run_read_tool(
     if file_path.trim().is_empty() {
         return "Error: file_path is required.".to_owned();
     }
-    let start_line = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
-    let end_line = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+    let start_line = args
+        .get("start_line")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let end_line = args
+        .get("end_line")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
 
     let outcome = crate::fs_tools::run_read(root, file_path, start_line, end_line);
     let Some((rel, s, e)) = outcome.range.clone() else {
@@ -1383,7 +1530,8 @@ fn parse_rerank_response(
             // Fallback: try raw response, strip markdown fences
             let trimmed = response.trim();
             if trimmed.starts_with("```") {
-                trimmed.lines()
+                trimmed
+                    .lines()
                     .filter(|line| !line.starts_with("```"))
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -1422,7 +1570,13 @@ fn parse_rerank_response(
         let (idx, raw_lines) = if let Some(i) = entry.as_u64() {
             (i as usize, None)
         } else if let Some(obj) = entry.as_object() {
-            let Some(i) = obj.get("chunk_index").or_else(|| obj.get("i")).and_then(|v| v.as_u64()) else { continue };
+            let Some(i) = obj
+                .get("chunk_index")
+                .or_else(|| obj.get("i"))
+                .and_then(|v| v.as_u64())
+            else {
+                continue;
+            };
             (i as usize, obj.get("lines").and_then(|v| v.as_array()))
         } else {
             continue;
@@ -1488,7 +1642,8 @@ fn lines_shape_is_malformed(arr: &[serde_json::Value]) -> bool {
     if arr.is_empty() {
         return false;
     }
-    arr.iter().any(|v| !matches!(v.as_array(), Some(p) if p.len() == 2))
+    arr.iter()
+        .any(|v| !matches!(v.as_array(), Some(p) if p.len() == 2))
 }
 
 /// Validate and normalize the LLM's `lines` array for one chunk:
@@ -1517,7 +1672,9 @@ fn sanitize_ranges(
         if p.len() != 2 {
             continue;
         }
-        let (Some(s), Some(e)) = (p[0].as_u64(), p[1].as_u64()) else { continue };
+        let (Some(s), Some(e)) = (p[0].as_u64(), p[1].as_u64()) else {
+            continue;
+        };
         let (s, e) = (s as u32, e as u32);
         if s > e {
             continue;
@@ -1642,7 +1799,10 @@ mod tests {
         // [7,11]→[5,13]; [20,28]→[18,30]. Disjoint (gap 13→18 > 1) → two ranges.
         assert_eq!(out, vec![(5, 13), (18, 30)]);
         // A wide nested pair stays one contiguous range.
-        assert_eq!(sanitize_ranges(&[json!([15, 52])], 1, 100), Some(vec![(13, 54)]));
+        assert_eq!(
+            sanitize_ranges(&[json!([15, 52])], 1, 100),
+            Some(vec![(13, 54)])
+        );
     }
 
     // ── lines_shape_is_malformed / malformed_line_chunks (reject-and-nudge) ──
@@ -1655,7 +1815,10 @@ mod tests {
         // A single stray bare int among pairs is still malformed (one bad elem).
         assert!(lines_shape_is_malformed(&[json!([7, 11]), json!(20)]));
         // Well-formed nested pairs: not malformed.
-        assert!(!lines_shape_is_malformed(&[json!([7, 11]), json!([20, 28])]));
+        assert!(!lines_shape_is_malformed(&[
+            json!([7, 11]),
+            json!([20, 28])
+        ]));
         // Empty array → "whole chunk", never flagged.
         assert!(!lines_shape_is_malformed(&[]));
     }
@@ -1889,7 +2052,7 @@ mod tests {
         assert_eq!(accumulated.len(), 3);
         assert_eq!(accumulated[0], (2, None));
         assert_eq!(accumulated[1], (0, Some(vec![(108, 122)]))); // big chunk → ranges kept
-        assert_eq!(accumulated[2], (1, None));                    // small chunk → whole
+        assert_eq!(accumulated[2], (1, None)); // small chunk → whole
     }
 
     #[test]
@@ -1918,7 +2081,10 @@ mod tests {
         // same slice_numbered the engine uses — so the budget measures real output.
         let expected = slice_numbered(&numbered_text, 100, 108, 122).len();
         assert_eq!(chars, expected);
-        assert!(chars < numbered_text.len(), "sliced is smaller than whole chunk");
+        assert!(
+            chars < numbered_text.len(),
+            "sliced is smaller than whole chunk"
+        );
     }
 
     #[test]
@@ -2073,69 +2239,105 @@ mod tests {
     #[test]
     fn matrix_agent_done_zero_is_empty_relevant_not_fallback() {
         // Agent finished with text and selected nothing → honor as empty result.
-        assert_eq!(decide_final_action(LoopExit::AgentDone, 0), FinalAction::EmptyRelevant);
+        assert_eq!(
+            decide_final_action(LoopExit::AgentDone, 0),
+            FinalAction::EmptyRelevant
+        );
     }
 
     #[test]
     fn matrix_agent_done_nonzero_uses_accumulated() {
-        assert_eq!(decide_final_action(LoopExit::AgentDone, 3), FinalAction::UseAccumulated);
+        assert_eq!(
+            decide_final_action(LoopExit::AgentDone, 3),
+            FinalAction::UseAccumulated
+        );
     }
 
     #[test]
     fn matrix_llm_error_zero_is_fallback() {
         // HTTP error with nothing committed → fallback to original order.
-        assert_eq!(decide_final_action(LoopExit::LlmError, 0), FinalAction::Fallback);
+        assert_eq!(
+            decide_final_action(LoopExit::LlmError, 0),
+            FinalAction::Fallback
+        );
     }
 
     #[test]
     fn matrix_llm_error_nonzero_keeps_accumulated() {
         // HTTP error AFTER the agent committed chunks → keep them (break-and-keep).
-        assert_eq!(decide_final_action(LoopExit::LlmError, 2), FinalAction::UseAccumulated);
+        assert_eq!(
+            decide_final_action(LoopExit::LlmError, 2),
+            FinalAction::UseAccumulated
+        );
     }
 
     #[test]
     fn matrix_query_budget_nonzero_uses_accumulated() {
         // Spent the query budget but had committed chunks → keep them.
-        assert_eq!(decide_final_action(LoopExit::QueryBudget, 5), FinalAction::UseAccumulated);
+        assert_eq!(
+            decide_final_action(LoopExit::QueryBudget, 5),
+            FinalAction::UseAccumulated
+        );
     }
 
     #[test]
     fn matrix_query_budget_zero_is_fallback() {
         // Used all queries but never added a chunk → fallback to original order.
-        assert_eq!(decide_final_action(LoopExit::QueryBudget, 0), FinalAction::Fallback);
+        assert_eq!(
+            decide_final_action(LoopExit::QueryBudget, 0),
+            FinalAction::Fallback
+        );
     }
 
     #[test]
     fn matrix_chunk_char_budget_nonzero_uses_accumulated() {
         // Hit the char budget → by construction chunks were committed → keep them.
-        assert_eq!(decide_final_action(LoopExit::ChunkCharBudget, 4), FinalAction::UseAccumulated);
+        assert_eq!(
+            decide_final_action(LoopExit::ChunkCharBudget, 4),
+            FinalAction::UseAccumulated
+        );
     }
 
     #[test]
     fn matrix_chunk_char_budget_zero_is_fallback() {
         // Unreachable in the live loop (chars only grow when add_chunks commits),
         // but the table is total — fallback is the safe choice.
-        assert_eq!(decide_final_action(LoopExit::ChunkCharBudget, 0), FinalAction::Fallback);
+        assert_eq!(
+            decide_final_action(LoopExit::ChunkCharBudget, 0),
+            FinalAction::Fallback
+        );
     }
 
     #[test]
     fn matrix_iteration_cap_zero_is_fallback() {
-        assert_eq!(decide_final_action(LoopExit::IterationCap, 0), FinalAction::Fallback);
+        assert_eq!(
+            decide_final_action(LoopExit::IterationCap, 0),
+            FinalAction::Fallback
+        );
     }
 
     #[test]
     fn matrix_iteration_cap_nonzero_uses_accumulated() {
-        assert_eq!(decide_final_action(LoopExit::IterationCap, 2), FinalAction::UseAccumulated);
+        assert_eq!(
+            decide_final_action(LoopExit::IterationCap, 2),
+            FinalAction::UseAccumulated
+        );
     }
 
     #[test]
     fn matrix_byte_cap_zero_is_fallback() {
-        assert_eq!(decide_final_action(LoopExit::ByteCap, 0), FinalAction::Fallback);
+        assert_eq!(
+            decide_final_action(LoopExit::ByteCap, 0),
+            FinalAction::Fallback
+        );
     }
 
     #[test]
     fn matrix_byte_cap_nonzero_uses_accumulated() {
-        assert_eq!(decide_final_action(LoopExit::ByteCap, 1), FinalAction::UseAccumulated);
+        assert_eq!(
+            decide_final_action(LoopExit::ByteCap, 1),
+            FinalAction::UseAccumulated
+        );
     }
 
     #[test]
@@ -2155,8 +2357,8 @@ mod tests {
     // proving each failure-matrix row maps to the correct observable
     // RerankOutput. No parallel copy of the field-assembly logic exists.
 
-    use std::cell::RefCell;
     use crate::llm::ToolCall;
+    use std::cell::RefCell;
 
     /// One scripted LLM turn outcome the mock will return, in order.
     enum MockTurn {
@@ -2178,14 +2380,26 @@ mod tests {
 
     impl MockBackend {
         fn new(turns: Vec<MockTurn>) -> Self {
-            Self { turns: RefCell::new(turns.into()), sub_query_chunks: vec![], repo_root: None }
+            Self {
+                turns: RefCell::new(turns.into()),
+                sub_query_chunks: vec![],
+                repo_root: None,
+            }
         }
         fn with_sub_query(turns: Vec<MockTurn>, sub: Vec<MergeChunk>) -> Self {
-            Self { turns: RefCell::new(turns.into()), sub_query_chunks: sub, repo_root: None }
+            Self {
+                turns: RefCell::new(turns.into()),
+                sub_query_chunks: sub,
+                repo_root: None,
+            }
         }
         /// Mock that exposes a real on-disk repo root so grep/read run for real.
         fn with_root(turns: Vec<MockTurn>, root: std::path::PathBuf) -> Self {
-            Self { turns: RefCell::new(turns.into()), sub_query_chunks: vec![], repo_root: Some(root) }
+            Self {
+                turns: RefCell::new(turns.into()),
+                sub_query_chunks: vec![],
+                repo_root: Some(root),
+            }
         }
     }
 
@@ -2245,7 +2459,10 @@ mod tests {
 
     /// An `add_chunks` call carrying MANY chunks at once (one turn, many chunks).
     fn add_chunks_call(indices: &[usize]) -> ToolCall {
-        let chunks: Vec<_> = indices.iter().map(|i| json!({ "chunk_index": i })).collect();
+        let chunks: Vec<_> = indices
+            .iter()
+            .map(|i| json!({ "chunk_index": i }))
+            .collect();
         ToolCall {
             name: "add_chunks".to_owned(),
             id: Some("batch".to_owned()),
@@ -2260,16 +2477,36 @@ mod tests {
     }
 
     /// Like `run_loop` but with an explicit char budget (for char-budget tests).
-    fn run_loop_full(backend: &MockBackend, n: usize, max_turns: u32, max_chunk_chars: u32) -> (RerankOutput, ExtendedPool) {
+    fn run_loop_full(
+        backend: &MockBackend,
+        n: usize,
+        max_turns: u32,
+        max_chunk_chars: u32,
+    ) -> (RerankOutput, ExtendedPool) {
         // Base chunks get DISTINCT line ranges (100+i .. 110+i) so a test can
         // tell a base chunk from a sub-query chunk by its coordinates — this is
         // what proves base indices resolve to base chunks, not shifted ones.
-        let chunks: Vec<MergeChunk> = (0..n).map(|i| chunk(100 + i as u32, 110 + i as u32)).collect();
+        let chunks: Vec<MergeChunk> = (0..n)
+            .map(|i| chunk(100 + i as u32, 110 + i as u32))
+            .collect();
         let numbered = vec![None; n];
         let caller_stats = vec![None; n];
         // Drive the REAL loop on the current-thread runtime.
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(run_agentic_loop(backend, "q", &chunks, &numbered, &caller_stats, 16, max_turns, max_chunk_chars, false))
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(run_agentic_loop(
+            backend,
+            "q",
+            &chunks,
+            &numbered,
+            &caller_stats,
+            16,
+            max_turns,
+            max_chunk_chars,
+            false,
+        ))
     }
 
     /// Mirror of engine.rs step-7 index resolution: for each reranked index,
@@ -2280,7 +2517,9 @@ mod tests {
     fn resolve_like_engine(out: &RerankOutput, pool: &ExtendedPool) -> Vec<(u32, u32)> {
         let mut resolved = Vec::new();
         for &idx in &out.reranked_indices {
-            let Some(chunk) = pool.chunks.get(idx) else { continue };
+            let Some(chunk) = pool.chunks.get(idx) else {
+                continue;
+            };
             resolved.push((chunk.line_start, chunk.line_end));
         }
         resolved
@@ -2301,15 +2540,28 @@ mod tests {
         // Every iteration emits an unknown tool (never add_chunks, never finishes,
         // never queries) → hits the hard iteration ceiling with zero accumulated.
         // Script enough no-ops to exceed max_iterations = max(budget*4, 12).
-        let noop = || MockTurn::Calls(vec![ToolCall {
-            name: "noop".to_owned(), id: Some("x".into()), args: json!({}),
-            ..Default::default()
-        }]);
+        let noop = || {
+            MockTurn::Calls(vec![ToolCall {
+                name: "noop".to_owned(),
+                id: Some("x".into()),
+                args: json!({}),
+                ..Default::default()
+            }])
+        };
         let backend = MockBackend::new((0..20).map(|_| noop()).collect());
         let (out, _pool) = run_loop(&backend, 4, 2);
-        assert_eq!(out.reranked_indices, vec![0, 1, 2, 3], "fallback = original order");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0, 1, 2, 3],
+            "fallback = original order"
+        );
         assert!(out.fallback_used, "must be flagged as fallback");
-        assert!(out.skip_reason.as_deref().unwrap().contains("iteration ceiling"));
+        assert!(
+            out.skip_reason
+                .as_deref()
+                .unwrap()
+                .contains("iteration ceiling")
+        );
     }
 
     #[test]
@@ -2332,8 +2584,10 @@ mod tests {
             vec![
                 // Turn 0: query loads the oversized chunk (base_n=2 → idx 2).
                 MockTurn::Calls(vec![ToolCall {
-                    name: "query".to_owned(), id: Some("q".into()),
-                    args: json!({ "information_request": "x" }), ..Default::default()
+                    name: "query".to_owned(),
+                    id: Some("q".into()),
+                    args: json!({ "information_request": "x" }),
+                    ..Default::default()
                 }]),
                 // Turn 1 never starts: byte cap trips → ByteCap exit.
                 // Final harvest turn: model commits the sub-query chunk.
@@ -2342,8 +2596,15 @@ mod tests {
             vec![big],
         );
         let (out, _pool) = run_loop(&backend, 2, 9);
-        assert_eq!(out.reranked_indices, vec![2], "sub-query chunk harvested in final turn");
-        assert!(!out.fallback_used, "harvested → UseAccumulated, not fallback");
+        assert_eq!(
+            out.reranked_indices,
+            vec![2],
+            "sub-query chunk harvested in final turn"
+        );
+        assert!(
+            !out.fallback_used,
+            "harvested → UseAccumulated, not fallback"
+        );
     }
 
     #[test]
@@ -2355,7 +2616,11 @@ mod tests {
             MockTurn::Err("503 upstream".into()),
         ]);
         let (out, _pool) = run_loop(&backend, 4, 5);
-        assert_eq!(out.reranked_indices, vec![2, 0], "accumulated order preserved");
+        assert_eq!(
+            out.reranked_indices,
+            vec![2, 0],
+            "accumulated order preserved"
+        );
         assert!(!out.fallback_used, "accumulated chunks are not a fallback");
     }
 
@@ -2377,7 +2642,11 @@ mod tests {
             MockTurn::Text("done".into()),
         ]);
         let (out, _pool) = run_loop(&backend, 3, 5);
-        assert_eq!(out.reranked_indices, vec![1, 0], "selection order preserved");
+        assert_eq!(
+            out.reranked_indices,
+            vec![1, 0],
+            "selection order preserved"
+        );
         assert!(!out.fallback_used);
         // chunk(1,10) span 9 < min_prune_lines 16 → both kept whole.
         assert_eq!(out.line_selections, vec![None, None]);
@@ -2401,7 +2670,11 @@ mod tests {
             MockTurn::Text("done".into()),
         ]);
         let (out, _pool) = run_loop(&backend, 3, 5);
-        assert_eq!(out.reranked_indices, vec![1, 0], "dedup keeps first occurrence");
+        assert_eq!(
+            out.reranked_indices,
+            vec![1, 0],
+            "dedup keeps first occurrence"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2427,15 +2700,24 @@ mod tests {
         );
         // n=2 base chunks; sub-query adds index 2.
         let (out, pool) = run_loop(&backend, 2, 5);
-        assert_eq!(out.reranked_indices, vec![2], "added the extended sub-query chunk");
+        assert_eq!(
+            out.reranked_indices,
+            vec![2],
+            "added the extended sub-query chunk"
+        );
         assert!(!out.fallback_used);
         // The extended pool must carry the sub-query chunk at index 2, and the
         // engine resolves the reranked index against THIS pool (not base merged).
         assert_eq!(pool.chunks.len(), 3, "base 2 + 1 sub-query chunk");
-        assert_eq!(pool.chunks[2].line_start, 50, "index 2 is the sub-query chunk");
+        assert_eq!(
+            pool.chunks[2].line_start, 50,
+            "index 2 is the sub-query chunk"
+        );
         assert_eq!(pool.chunks[2].line_end, 60);
-        assert!(pool.chunks.get(out.reranked_indices[0]).is_some(),
-            "reranked index resolves within the extended pool");
+        assert!(
+            pool.chunks.get(out.reranked_indices[0]).is_some(),
+            "reranked index resolves within the extended pool"
+        );
     }
 
     #[test]
@@ -2461,7 +2743,11 @@ mod tests {
         let (out, pool) = run_loop(&backend, 3, 5);
 
         assert!(out.fallback_used, "must be a fallback");
-        assert_eq!(out.reranked_indices, vec![0, 1, 2], "fallback = base order 0..base_n");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0, 1, 2],
+            "fallback = base order 0..base_n"
+        );
         assert_eq!(pool.chunks.len(), 5, "pool = 3 base + 2 sub-query");
 
         // Resolve exactly as engine.rs does. All three base indices must resolve
@@ -2473,7 +2759,11 @@ mod tests {
             vec![(100, 110), (101, 111), (102, 112)],
             "base indices resolve to base chunks, not the appended sub-query chunks"
         );
-        assert_eq!(resolved.len(), 3, "no base index silently dropped via else-continue");
+        assert_eq!(
+            resolved.len(),
+            3,
+            "no base index silently dropped via else-continue"
+        );
     }
 
     #[test]
@@ -2499,7 +2789,11 @@ mod tests {
 
         assert!(!out.fallback_used, "EmptyRelevant is NOT a fallback");
         assert!(out.reranked_indices.is_empty(), "agent selected nothing");
-        assert_eq!(pool.chunks.len(), 4, "pool still populated: 3 base + 1 sub-query");
+        assert_eq!(
+            pool.chunks.len(),
+            4,
+            "pool still populated: 3 base + 1 sub-query"
+        );
         // Engine-style resolution over zero indices yields zero blocks — no panic
         // on the non-empty pool.
         assert!(resolve_like_engine(&out, &pool).is_empty());
@@ -2515,21 +2809,27 @@ mod tests {
         let backend = MockBackend::with_sub_query(
             vec![
                 MockTurn::Calls(vec![ToolCall {
-                    name: "query".to_owned(), id: Some("q1".into()),
+                    name: "query".to_owned(),
+                    id: Some("q1".into()),
                     args: json!({ "information_request": "first query" }),
                     ..Default::default()
-                }]),                                            // query 1/2
+                }]), // query 1/2
                 MockTurn::Calls(vec![ToolCall {
-                    name: "query".to_owned(), id: Some("q2".into()),
+                    name: "query".to_owned(),
+                    id: Some("q2".into()),
                     args: json!({ "information_request": "second query" }),
                     ..Default::default()
-                }]),                                            // query 2/2
-                MockTurn::Calls(vec![add_chunk_call(0)]),       // agent gets to add_chunks
+                }]), // query 2/2
+                MockTurn::Calls(vec![add_chunk_call(0)]), // agent gets to add_chunks
             ],
             sub,
         );
         let (out, _pool) = run_loop(&backend, 2, 2);
-        assert_eq!(out.reranked_indices, vec![0], "agent could add_chunks after query budget exhausted");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0],
+            "agent could add_chunks after query budget exhausted"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2542,8 +2842,12 @@ mod tests {
         let backend = MockBackend::with_sub_query(
             vec![
                 MockTurn::Calls(vec![
-                    ToolCall { name: "query".to_owned(), id: Some("q".into()),
-                               args: json!({ "information_request": "x" }), ..Default::default() },
+                    ToolCall {
+                        name: "query".to_owned(),
+                        id: Some("q".into()),
+                        args: json!({ "information_request": "x" }),
+                        ..Default::default()
+                    },
                     add_chunk_call(0),
                 ]),
                 MockTurn::Text("done".into()), // not reached (budget hit)
@@ -2551,7 +2855,11 @@ mod tests {
             sub,
         );
         let (out, _pool) = run_loop(&backend, 2, 1);
-        assert_eq!(out.reranked_indices, vec![0], "committed chunk kept despite query budget");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0],
+            "committed chunk kept despite query budget"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2564,7 +2872,11 @@ mod tests {
             MockTurn::Text("done".into()),
         ]);
         let (out, _pool) = run_loop(&backend, 3, 1);
-        assert_eq!(out.reranked_indices, vec![0, 1, 2], "all add_chunks committed, query budget untouched");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0, 1, 2],
+            "all add_chunks committed, query budget untouched"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2576,8 +2888,12 @@ mod tests {
         let backend = MockBackend::with_sub_query(
             vec![
                 MockTurn::Calls(vec![
-                    ToolCall { name: "query".to_owned(), id: Some("q".into()),
-                               args: json!({ "information_request": "x" }), ..Default::default() },
+                    ToolCall {
+                        name: "query".to_owned(),
+                        id: Some("q".into()),
+                        args: json!({ "information_request": "x" }),
+                        ..Default::default()
+                    },
                     add_chunk_call(0),
                 ]),
                 MockTurn::Calls(vec![add_chunk_call(1)]), // not reached
@@ -2585,7 +2901,11 @@ mod tests {
             sub,
         );
         let (out, _pool) = run_loop(&backend, 2, 0);
-        assert_eq!(out.reranked_indices, vec![0], "clamped query budget of 1 allows one query turn");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0],
+            "clamped query budget of 1 allows one query turn"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2602,8 +2922,15 @@ mod tests {
         ]);
         // query budget high (10) so it cannot interfere; char budget = 7.
         let (out, _pool) = run_loop_full(&backend, 3, 10, 7);
-        assert_eq!(out.reranked_indices, vec![0, 1], "stopped after char budget, both kept");
-        assert!(!out.fallback_used, "char budget with chunks → UseAccumulated");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0, 1],
+            "stopped after char budget, both kept"
+        );
+        assert!(
+            !out.fallback_used,
+            "char budget with chunks → UseAccumulated"
+        );
         assert!(out.skip_reason.is_none());
     }
 
@@ -2616,7 +2943,11 @@ mod tests {
             MockTurn::Text("done".into()),
         ]);
         let (out, _pool) = run_loop_full(&backend, 3, 10, 0);
-        assert_eq!(out.reranked_indices, vec![0, 1, 2], "no char cap → all kept");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0, 1, 2],
+            "no char cap → all kept"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2630,7 +2961,11 @@ mod tests {
             MockTurn::Text("done".into()), // not reached
         ]);
         let (out, _pool) = run_loop_full(&backend, 3, 10, 10);
-        assert_eq!(out.reranked_indices, vec![0, 1, 2], "all chunks from the over-budget call kept");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0, 1, 2],
+            "all chunks from the over-budget call kept"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2649,7 +2984,11 @@ mod tests {
             MockTurn::Text("done".into()),
         ]);
         let (out, _pool) = run_loop_full(&backend, 3, 10, 50_000);
-        assert_eq!(out.reranked_indices, vec![0], "only first add_chunks committed");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0],
+            "only first add_chunks committed"
+        );
         assert!(!out.fallback_used);
     }
 
@@ -2657,7 +2996,10 @@ mod tests {
     fn boundary_exit_only_checks_char_stop() {
         // boundary_exit now only gates on the char-budget hard cap.
         // Query budget is enforced in the dispatch loop, not here.
-        assert_eq!(boundary_exit(Some(LoopExit::ChunkCharBudget)), Some(LoopExit::ChunkCharBudget));
+        assert_eq!(
+            boundary_exit(Some(LoopExit::ChunkCharBudget)),
+            Some(LoopExit::ChunkCharBudget)
+        );
         assert_eq!(boundary_exit(None), None);
     }
 
@@ -2671,8 +3013,12 @@ mod tests {
         let backend = MockBackend::with_sub_query(
             vec![
                 MockTurn::Calls(vec![
-                    ToolCall { name: "query".to_owned(), id: Some("q".into()),
-                               args: json!({ "information_request": "x" }), ..Default::default() },
+                    ToolCall {
+                        name: "query".to_owned(),
+                        id: Some("q".into()),
+                        args: json!({ "information_request": "x" }),
+                        ..Default::default()
+                    },
                     add_chunk_call(0), // +6 == char_budget 6 → mid-turn ChunkCharBudget
                 ]),
                 MockTurn::Text("done".into()), // not reached
@@ -2691,14 +3037,30 @@ mod tests {
     /// so grep/read run for real against `root`. Base chunks use the same
     /// distinct line coordinates as `run_loop_full` (100+i..110+i).
     fn run_loop_grep_read(
-        backend: &MockBackend, n: usize, max_turns: u32, max_chunk_chars: u32,
+        backend: &MockBackend,
+        n: usize,
+        max_turns: u32,
+        max_chunk_chars: u32,
     ) -> (RerankOutput, ExtendedPool) {
-        let chunks: Vec<MergeChunk> = (0..n).map(|i| chunk(100 + i as u32, 110 + i as u32)).collect();
+        let chunks: Vec<MergeChunk> = (0..n)
+            .map(|i| chunk(100 + i as u32, 110 + i as u32))
+            .collect();
         let numbered = vec![None; n];
         let caller_stats = vec![None; n];
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(run_agentic_loop(
-            backend, "q", &chunks, &numbered, &caller_stats, 16, max_turns, max_chunk_chars, true,
+            backend,
+            "q",
+            &chunks,
+            &numbered,
+            &caller_stats,
+            16,
+            max_turns,
+            max_chunk_chars,
+            true,
         ))
     }
 
@@ -2742,7 +3104,10 @@ mod tests {
         );
         let (out, pool) = run_loop_grep_read(&backend, 1, 5, 0);
         // The grep chunk (index 1) was synthesized into the pool and committed.
-        assert!(out.reranked_indices.contains(&1), "grepped chunk must be committable");
+        assert!(
+            out.reranked_indices.contains(&1),
+            "grepped chunk must be committable"
+        );
         assert!(pool.chunks.len() >= 2, "grep appended a pool chunk");
         assert!(!out.fallback_used);
         // The appended chunk points at the matched file.
@@ -2765,7 +3130,10 @@ mod tests {
             dir.path().to_path_buf(),
         );
         let (out, pool) = run_loop_grep_read(&backend, 1, 5, 0);
-        assert!(out.reranked_indices.contains(&1), "read chunk must be committable");
+        assert!(
+            out.reranked_indices.contains(&1),
+            "read chunk must be committable"
+        );
         assert_eq!(pool.chunks[1].line_start, 5);
         assert_eq!(pool.chunks[1].line_end, 10);
         assert!(pool.chunks[1].file.ends_with("f.rs"));
@@ -2791,8 +3159,15 @@ mod tests {
         );
         // max_turns (query budget) = 1, but 3 greps run fine because they don't count.
         let (out, _pool) = run_loop_grep_read(&backend, 1, 1, 0);
-        assert_eq!(out.reranked_indices, vec![0], "base chunk kept; greps explored freely");
-        assert!(!out.fallback_used, "agent reached [DONE] cleanly, not a budget fallback");
+        assert_eq!(
+            out.reranked_indices,
+            vec![0],
+            "base chunk kept; greps explored freely"
+        );
+        assert!(
+            !out.fallback_used,
+            "agent reached [DONE] cleanly, not a budget fallback"
+        );
     }
 
     #[test]
@@ -2833,8 +3208,10 @@ mod tests {
                 MockTurn::Calls(vec![add_chunk_flat_lines(0, json!([110, 111, 120, 121]))]),
                 MockTurn::Calls(vec![add_chunk_call_lines(0, json!([[110, 121]]))]),
                 MockTurn::Calls(vec![ToolCall {
-                    name: "query".to_owned(), id: Some("q".into()),
-                    args: json!({ "information_request": "more" }), ..Default::default()
+                    name: "query".to_owned(),
+                    id: Some("q".into()),
+                    args: json!({ "information_request": "more" }),
+                    ..Default::default()
                 }]),
                 MockTurn::Text("[DONE]".into()),
             ],
@@ -2845,9 +3222,20 @@ mod tests {
         let chunks = vec![chunk(100, 200)];
         let numbered = vec![None];
         let caller_stats = vec![None];
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let (out, _pool) = rt.block_on(run_agentic_loop(
-            &backend, "q", &chunks, &numbered, &caller_stats, 16, 5, 0, false,
+            &backend,
+            "q",
+            &chunks,
+            &numbered,
+            &caller_stats,
+            16,
+            5,
+            0,
+            false,
         ));
         // The corrected call committed chunk 0 with a real PRUNED line selection
         // ([[110,121]] padded ±2 → [(108,123)]). If the flat call had been
@@ -2872,6 +3260,9 @@ mod tests {
         // Accepted on the (cap+1)th try → chunk 0 committed (whole chunk: the flat
         // lines yield no valid nested range, so selection is None = keep all).
         assert_eq!(out.reranked_indices, vec![0]);
-        assert!(!out.fallback_used, "accepted-as-is is a real selection, not a fallback");
+        assert!(
+            !out.fallback_used,
+            "accepted-as-is is a real selection, not a fallback"
+        );
     }
 }

@@ -6,8 +6,8 @@ use tracing::info;
 
 use crate::path_in_repo;
 
-pub mod sharded;
 pub mod shard_file;
+pub mod sharded;
 pub use sharded::{ShardedSearch, ShardedVectorIndex};
 
 // ─── Public types ─────────────────────────────────────────────────────────
@@ -74,7 +74,11 @@ impl EmbeddingStore {
     fn as_slice(&self) -> &[f32] {
         match self {
             EmbeddingStore::Ram(v) => v.as_slice(),
-            EmbeddingStore::Mmap { map, f32_off, f32_len } => {
+            EmbeddingStore::Mmap {
+                map,
+                f32_off,
+                f32_len,
+            } => {
                 let bytes = &map[*f32_off..*f32_off + *f32_len * std::mem::size_of::<f32>()];
                 // The writer 4-byte-aligns the f32 region (validated on open), so
                 // this cast is sound. bytemuck checks alignment + size.
@@ -231,7 +235,9 @@ impl VectorIndex {
             );
             return;
         }
-        self.store.ram_mut().extend_from_slice(other.store.as_slice());
+        self.store
+            .ram_mut()
+            .extend_from_slice(other.store.as_slice());
         self.chunk_ids.extend(other.chunk_ids);
     }
 
@@ -265,9 +271,7 @@ impl VectorIndex {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         });
         scored.truncate(k);
-        scored.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         scored
             .into_iter()
@@ -331,7 +335,10 @@ impl VectorIndex {
         // blocks on. select_ms = DB scan of all chunk rows; decode_ms = bytes->Vec<f32>
         // deserialize (serde, single-threaded); insert_ms = L2-normalize + flat copy.
         info!(
-            count, select_ms, decode_ms, insert_ms,
+            count,
+            select_ms,
+            decode_ms,
+            insert_ms,
             total_ms = select_ms + decode_ms + insert_ms,
             "PERF SUMMARY load_from_db (cold shard warm breakdown)"
         );
@@ -387,7 +394,11 @@ impl VectorIndex {
         chunk_ids: Vec<ChunkId>,
     ) -> Self {
         Self {
-            store: EmbeddingStore::Mmap { map, f32_off, f32_len },
+            store: EmbeddingStore::Mmap {
+                map,
+                f32_off,
+                f32_len,
+            },
             chunk_ids,
             dim,
         }
@@ -513,7 +524,9 @@ mod tests {
             let deq = qi as f32 / QUANT_SCALE;
             assert!(
                 (orig - deq).abs() <= step / 2.0 + 1e-6,
-                "component error {} exceeds half-step {}", (orig - deq).abs(), step / 2.0
+                "component error {} exceeds half-step {}",
+                (orig - deq).abs(),
+                step / 2.0
             );
             assert!((-127..=127).contains(&(qi as i32)), "i8 in [-127,127]");
         }
@@ -632,12 +645,10 @@ mod tests {
     fn remove_repo_windows_paths_no_collision() {
         let mut index = VectorIndex::new();
 
-        let foo_chunks: Vec<(ChunkId, Vec<f32>)> = vec![
-            (chunk(r"D:\proj\foo\x.rs", 1, 10), emb(4, 1.0)),
-        ];
-        let foobar_chunks: Vec<(ChunkId, Vec<f32>)> = vec![
-            (chunk(r"D:\proj\foobar\y.rs", 1, 10), emb(4, 2.0)),
-        ];
+        let foo_chunks: Vec<(ChunkId, Vec<f32>)> =
+            vec![(chunk(r"D:\proj\foo\x.rs", 1, 10), emb(4, 1.0))];
+        let foobar_chunks: Vec<(ChunkId, Vec<f32>)> =
+            vec![(chunk(r"D:\proj\foobar\y.rs", 1, 10), emb(4, 2.0))];
 
         index.insert(&foo_chunks);
         index.insert(&foobar_chunks);
@@ -742,7 +753,7 @@ mod tests {
         let pairs: Vec<(ChunkId, Vec<f32>)> = (0..10_usize)
             .map(|i| {
                 let v: Vec<f32> = (0..dim).map(|j| i as f32 * 0.1 + j as f32 * 0.01).collect();
-                (chunk(&format!("/f{i}.rs", ), 1, 10), v)
+                (chunk(&format!("/f{i}.rs",), 1, 10), v)
             })
             .collect();
 

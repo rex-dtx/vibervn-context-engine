@@ -46,7 +46,6 @@ const PREVIEW_CHARS: usize = 280;
 // bounds the `-C` knob below.
 use crate::fs_tools::{GREP_MAX_CONTEXT, run_grep, run_read};
 
-
 // ─── Streaming events (serialized to SSE `data:` JSON) ────────────────────
 
 /// One event in the chat stream. `type` is the discriminator the UI switches on.
@@ -56,7 +55,11 @@ pub enum ChatEvent {
     /// The agent is invoking a tool. `summary` is a short human label.
     ToolCall { name: String, summary: String },
     /// A tool finished. `ok` is false when the tool returned an error string.
-    ToolResult { name: String, ok: bool, preview: String },
+    ToolResult {
+        name: String,
+        ok: bool,
+        preview: String,
+    },
     /// A text delta of the assistant's answer.
     Token { text: String },
     /// The turn finished successfully (final answer fully streamed).
@@ -196,7 +199,11 @@ impl ConversationStore {
         }
         // Cap the stored summary at store time — the single enforcement point.
         let tool_context = truncate_bytes(&tool_context, TOOL_CTX_PER_TURN_CAP);
-        conv.turns.push(Turn { user, answer, tool_context });
+        conv.turns.push(Turn {
+            user,
+            answer,
+            tool_context,
+        });
         conv.last_used = Instant::now();
 
         // Trim oldest turns.
@@ -320,7 +327,9 @@ fn collect_project_docs(repo_root: &std::path::Path) -> String {
     let mut sections: Vec<String> = Vec::new();
     let mut total = 0usize;
     for canonical in PROJECT_DOC_NAMES {
-        let Some(path) = found.get(canonical) else { continue };
+        let Some(path) = found.get(canonical) else {
+            continue;
+        };
         // Non-UTF-8 or unreadable files are skipped silently.
         let Ok(raw) = std::fs::read_to_string(path) else {
             continue;
@@ -492,13 +501,21 @@ async fn run_tool(
 ) -> (String, bool) {
     match name {
         TOOL_CODEBASE => {
-            let req = args.get("information_request").and_then(|v| v.as_str()).unwrap_or("");
+            let req = args
+                .get("information_request")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if req.trim().is_empty() {
                 return ("Error: information_request is required.".to_owned(), false);
             }
             let out = crate::mcp::run_codebase_retrieval(
-                &deps.home_dir, &deps.data_dir, &deps.index_engine, &deps.repo_dbs,
-                &deps.settings, req, repo,
+                &deps.home_dir,
+                &deps.data_dir,
+                &deps.index_engine,
+                &deps.repo_dbs,
+                &deps.settings,
+                req,
+                repo,
             )
             .await;
             let ok = !out.starts_with("Error:");
@@ -506,12 +523,24 @@ async fn run_tool(
         }
         TOOL_FILE => {
             let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let req = args.get("information_request").and_then(|v| v.as_str()).unwrap_or("");
+            let req = args
+                .get("information_request")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if file_path.trim().is_empty() || req.trim().is_empty() {
-                return ("Error: file_path and information_request are required.".to_owned(), false);
+                return (
+                    "Error: file_path and information_request are required.".to_owned(),
+                    false,
+                );
             }
             let out = crate::mcp::run_file_retrieval(
-                &deps.data_dir, &deps.repo_dbs, &deps.settings, repo, file_path, req, 5,
+                &deps.data_dir,
+                &deps.repo_dbs,
+                &deps.settings,
+                repo,
+                file_path,
+                req,
+                5,
             )
             .await;
             let ok = !out.starts_with("Error:");
@@ -523,8 +552,14 @@ async fn run_tool(
                 return ("Error: pattern is required.".to_owned(), false);
             }
             let path = args.get("path").and_then(|v| v.as_str()).map(str::to_owned);
-            let literal = args.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
-            let ignore_case = args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false);
+            let literal = args
+                .get("literal")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let ignore_case = args
+                .get("ignore_case")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let context_lines = args
                 .get("context_lines")
                 .and_then(|v| v.as_u64())
@@ -535,7 +570,14 @@ async fn run_tool(
             let root = std::path::PathBuf::from(crate::store::normalize_repo_path(repo));
             let pattern = pattern.to_owned();
             let outcome = tokio::task::spawn_blocking(move || {
-                run_grep(&root, &pattern, path.as_deref(), literal, ignore_case, context_lines)
+                run_grep(
+                    &root,
+                    &pattern,
+                    path.as_deref(),
+                    literal,
+                    ignore_case,
+                    context_lines,
+                )
             })
             .await;
             // The chat agent reads only the formatted text; grep regions are for
@@ -551,8 +593,14 @@ async fn run_tool(
                 return ("Error: file_path is required.".to_owned(), false);
             }
             // serde_json numbers may arrive as f64; clamp to a sane 1-based line.
-            let start_line = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
-            let end_line = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let start_line = args
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            let end_line = args
+                .get("end_line")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
             let root = std::path::PathBuf::from(crate::store::normalize_repo_path(repo));
             let file_path = file_path.to_owned();
             let outcome = tokio::task::spawn_blocking(move || {
@@ -590,12 +638,19 @@ fn tool_summary(name: &str, args: &serde_json::Value) -> String {
             .to_owned(),
         TOOL_FILE => {
             let f = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let r = args.get("information_request").and_then(|v| v.as_str()).unwrap_or("");
+            let r = args
+                .get("information_request")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("{f} — {r}")
         }
         TOOL_GREP => {
             let p = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            match args.get("path").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            match args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+            {
                 Some(scope) => format!("{p}  in {scope}"),
                 None => p.to_owned(),
             }
@@ -648,8 +703,16 @@ fn requested_search_floor(message: &str) -> Option<usize> {
     let lower = message.to_lowercase();
     // Only engage when the user is plainly talking about searching/looking, so
     // an unrelated number in the question ("fix bug 3") never triggers forcing.
-    const SEARCH_CUES: [&str; 8] =
-        ["search", "queries", "query", "tìm", "tra cứu", "搜索", "查", "检索"];
+    const SEARCH_CUES: [&str; 8] = [
+        "search",
+        "queries",
+        "query",
+        "tìm",
+        "tra cứu",
+        "搜索",
+        "查",
+        "检索",
+    ];
     if !SEARCH_CUES.iter().any(|c| lower.contains(c)) {
         return None;
     }
@@ -666,7 +729,9 @@ fn requested_search_floor(message: &str) -> Option<usize> {
     ];
     let mut best: Option<usize> = None;
     for (i, tok) in toks.iter().enumerate() {
-        let Some(n) = parse_count_token(tok) else { continue };
+        let Some(n) = parse_count_token(tok) else {
+            continue;
+        };
         if n == 0 {
             continue;
         }
@@ -846,8 +911,14 @@ pub async fn run_chat_turn(
     // the last K turns so the model can build on it instead of re-searching
     // from scratch (cross-turn memory; bounded by the store's byte caps).
     let mut messages: Vec<ChatMessage> = deps.conversations.snapshot(conversation_id, repo).await;
-    let prior_context = deps.conversations.recent_tool_context(conversation_id, repo).await;
-    messages.push(ChatMessage::User(augment_question_with_context(&prior_context, message)));
+    let prior_context = deps
+        .conversations
+        .recent_tool_context(conversation_id, repo)
+        .await;
+    messages.push(ChatMessage::User(augment_question_with_context(
+        &prior_context,
+        message,
+    )));
 
     let mut answer = String::new();
     // Accumulates the summaries of every search this turn runs, for storage so
@@ -880,7 +951,11 @@ pub async fn run_chat_turn(
         // burn every forced round on `file-retrieval` and never satisfy the floor.
         // Once the floor is met, the full tool set (incl. graph/file hops) returns.
         let turn_tools: Vec<ToolDef> = if force_tool_use {
-            tools.iter().filter(|t| t.name == TOOL_CODEBASE).cloned().collect()
+            tools
+                .iter()
+                .filter(|t| t.name == TOOL_CODEBASE)
+                .cloned()
+                .collect()
         } else {
             tools.clone()
         };
@@ -931,9 +1006,16 @@ pub async fn run_chat_turn(
                     // "search 3 times" by issuing the same query thrice.
                     if ok
                         && call.name == TOOL_CODEBASE
-                        && let Some(q) = call.args.get("information_request").and_then(|v| v.as_str())
+                        && let Some(q) = call
+                            .args
+                            .get("information_request")
+                            .and_then(|v| v.as_str())
                     {
-                        let norm = q.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+                        let norm = q
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .to_lowercase();
                         if !norm.is_empty() {
                             distinct_searches.insert(norm);
                         }
@@ -1006,7 +1088,13 @@ pub async fn run_chat_turn(
         // Pass an empty tool list so no further tool calls are possible.
         match llm
             .complete_with_tools_streaming(
-                &system, &messages, &[], 0.2, false, Some(&cache_key), &on_token,
+                &system,
+                &messages,
+                &[],
+                0.2,
+                false,
+                Some(&cache_key),
+                &on_token,
             )
             .await
         {
@@ -1036,12 +1124,17 @@ pub async fn run_chat_turn(
     // emitted tokens but returned no usable accumulated text — extremely rare,
     // but guard the transcript against storing an empty assistant turn.
     if answer.trim().is_empty() {
-        answer = "I couldn't gather enough indexed context to answer this confidently."
-            .to_owned();
+        answer = "I couldn't gather enough indexed context to answer this confidently.".to_owned();
     }
 
     deps.conversations
-        .append_turn(conversation_id, repo, message.to_owned(), answer, turn_tool_context)
+        .append_turn(
+            conversation_id,
+            repo,
+            message.to_owned(),
+            answer,
+            turn_tool_context,
+        )
         .await;
     let _ = tx.send(ChatEvent::Done);
 }
@@ -1091,12 +1184,24 @@ mod tests {
     #[test]
     fn search_floor_parses_explicit_counts() {
         // en
-        assert_eq!(requested_search_floor("git features, search 3 times"), Some(3));
+        assert_eq!(
+            requested_search_floor("git features, search 3 times"),
+            Some(3)
+        );
         assert_eq!(requested_search_floor("do 5 searches please"), Some(5));
-        assert_eq!(requested_search_floor("search at least three times"), Some(3));
+        assert_eq!(
+            requested_search_floor("search at least three times"),
+            Some(3)
+        );
         // vi
-        assert_eq!(requested_search_floor("các tính năng git, search 3 lần"), Some(3));
-        assert_eq!(requested_search_floor("tìm 4 lần để cover blast radius"), Some(4));
+        assert_eq!(
+            requested_search_floor("các tính năng git, search 3 lần"),
+            Some(3)
+        );
+        assert_eq!(
+            requested_search_floor("tìm 4 lần để cover blast radius"),
+            Some(4)
+        );
         // zh (digit splits from 次 as its own token via the alphanumeric split)
         assert_eq!(requested_search_floor("搜索 3 次"), Some(3));
     }
@@ -1106,15 +1211,24 @@ mod tests {
         // No search cue → never engage.
         assert_eq!(requested_search_floor("fix bug 3 in the parser"), None);
         // Search cue but no count near it → no floor.
-        assert_eq!(requested_search_floor("search the codebase for the parser"), None);
+        assert_eq!(
+            requested_search_floor("search the codebase for the parser"),
+            None
+        );
         // Number present but not adjacent to a count/search cue.
-        assert_eq!(requested_search_floor("search for the 42nd handler signature"), None);
+        assert_eq!(
+            requested_search_floor("search for the 42nd handler signature"),
+            None
+        );
     }
 
     #[test]
     fn search_floor_clamps_to_budget() {
         // A huge request is clamped to MAX_REQUESTED_SEARCHES, never the raw N.
-        assert_eq!(requested_search_floor("search 99 times"), Some(MAX_REQUESTED_SEARCHES));
+        assert_eq!(
+            requested_search_floor("search 99 times"),
+            Some(MAX_REQUESTED_SEARCHES)
+        );
         // Zero is meaningless and ignored.
         assert_eq!(requested_search_floor("search 0 times"), None);
     }
@@ -1129,7 +1243,10 @@ mod tests {
                 .await;
         }
         let map = store.inner.lock().await;
-        assert!(map.len() <= MAX_CONVERSATIONS + 1, "store must stay near the cap");
+        assert!(
+            map.len() <= MAX_CONVERSATIONS + 1,
+            "store must stay near the cap"
+        );
     }
 
     #[tokio::test]
@@ -1137,7 +1254,13 @@ mod tests {
         let store = ConversationStore::new();
         for i in 0..(MAX_TURNS_KEPT + 10) {
             store
-                .append_turn("c1", "/repo", format!("q{i}"), format!("a{i}"), String::new())
+                .append_turn(
+                    "c1",
+                    "/repo",
+                    format!("q{i}"),
+                    format!("a{i}"),
+                    String::new(),
+                )
                 .await;
         }
         let map = store.inner.lock().await;
@@ -1148,7 +1271,9 @@ mod tests {
     #[tokio::test]
     async fn drop_removes_conversation() {
         let store = ConversationStore::new();
-        store.append_turn("c1", "/repo", "q".to_owned(), "a".to_owned(), String::new()).await;
+        store
+            .append_turn("c1", "/repo", "q".to_owned(), "a".to_owned(), String::new())
+            .await;
         store.drop_conversation("c1").await;
         assert!(store.inner.lock().await.get("c1").is_none());
     }
@@ -1156,7 +1281,15 @@ mod tests {
     #[tokio::test]
     async fn snapshot_resets_on_repo_mismatch() {
         let store = ConversationStore::new();
-        store.append_turn("c1", "/repo-a", "q".to_owned(), "a".to_owned(), String::new()).await;
+        store
+            .append_turn(
+                "c1",
+                "/repo-a",
+                "q".to_owned(),
+                "a".to_owned(),
+                String::new(),
+            )
+            .await;
         // Same id, different repo → treated as empty (fresh) conversation.
         let snap = store.snapshot("c1", "/repo-b").await;
         assert!(snap.is_empty());
@@ -1221,7 +1354,10 @@ mod tests {
         }
         let s = summarize_tool_result("many", &output);
         let count = s.matches("#L").count();
-        assert_eq!(count, MAX_LOCATIONS_PER_RESULT, "must cap locations per result");
+        assert_eq!(
+            count, MAX_LOCATIONS_PER_RESULT,
+            "must cap locations per result"
+        );
     }
 
     #[test]
@@ -1241,8 +1377,12 @@ mod tests {
     #[tokio::test]
     async fn recent_tool_context_replays_recent_turns() {
         let store = ConversationStore::new();
-        store.append_turn("c1", "/r", "q1".into(), "a1".into(), "ctx-1".into()).await;
-        store.append_turn("c1", "/r", "q2".into(), "a2".into(), "ctx-2".into()).await;
+        store
+            .append_turn("c1", "/r", "q1".into(), "a1".into(), "ctx-1".into())
+            .await;
+        store
+            .append_turn("c1", "/r", "q2".into(), "a2".into(), "ctx-2".into())
+            .await;
         let ctx = store.recent_tool_context("c1", "/r").await;
         assert!(ctx.contains("ctx-1"));
         assert!(ctx.contains("ctx-2"));
@@ -1255,7 +1395,13 @@ mod tests {
         let store = ConversationStore::new();
         for i in 0..(TOOL_CTX_TURNS_KEPT + 3) {
             store
-                .append_turn("c1", "/r", format!("q{i}"), format!("a{i}"), format!("ctx-{i}"))
+                .append_turn(
+                    "c1",
+                    "/r",
+                    format!("q{i}"),
+                    format!("a{i}"),
+                    format!("ctx-{i}"),
+                )
                 .await;
         }
         let ctx = store.recent_tool_context("c1", "/r").await;
@@ -1270,9 +1416,15 @@ mod tests {
     async fn recent_tool_context_skips_empty_summaries() {
         let store = ConversationStore::new();
         // Chit-chat turns (no search) store empty tool_context and are skipped.
-        store.append_turn("c1", "/r", "hi".into(), "hello".into(), String::new()).await;
-        store.append_turn("c1", "/r", "q".into(), "a".into(), "real-ctx".into()).await;
-        store.append_turn("c1", "/r", "thanks".into(), "yw".into(), String::new()).await;
+        store
+            .append_turn("c1", "/r", "hi".into(), "hello".into(), String::new())
+            .await;
+        store
+            .append_turn("c1", "/r", "q".into(), "a".into(), "real-ctx".into())
+            .await;
+        store
+            .append_turn("c1", "/r", "thanks".into(), "yw".into(), String::new())
+            .await;
         let ctx = store.recent_tool_context("c1", "/r").await;
         assert_eq!(ctx, "real-ctx");
     }
@@ -1281,7 +1433,9 @@ mod tests {
     async fn per_turn_context_capped_at_store_time() {
         let store = ConversationStore::new();
         let huge = "x".repeat(TOOL_CTX_PER_TURN_CAP * 4);
-        store.append_turn("c1", "/r", "q".into(), "a".into(), huge).await;
+        store
+            .append_turn("c1", "/r", "q".into(), "a".into(), huge)
+            .await;
         let map = store.inner.lock().await;
         let conv = map.get("c1").unwrap();
         // Stored summary must be hard-bounded regardless of input size.
@@ -1296,7 +1450,13 @@ mod tests {
         let near_cap = "y".repeat(TOOL_CTX_PER_TURN_CAP - 10);
         for i in 0..TOOL_CTX_TURNS_KEPT {
             store
-                .append_turn("c1", "/r", format!("q{i}"), format!("a{i}"), near_cap.clone())
+                .append_turn(
+                    "c1",
+                    "/r",
+                    format!("q{i}"),
+                    format!("a{i}"),
+                    near_cap.clone(),
+                )
                 .await;
         }
         let ctx = store.recent_tool_context("c1", "/r").await;
@@ -1325,7 +1485,10 @@ mod tests {
             if line == "… [truncated]" {
                 continue;
             }
-            assert!(["aaaa", "bbbb", "cccc", "dddd"].contains(&line), "got partial line {line:?}");
+            assert!(
+                ["aaaa", "bbbb", "cccc", "dddd"].contains(&line),
+                "got partial line {line:?}"
+            );
         }
         // Bounded: kept content (excluding marker) stays under the cap.
         assert!(t.len() <= 12 + "… [truncated]".len());
@@ -1351,7 +1514,11 @@ mod tests {
         let a = out.find("AGENTS.md").unwrap();
         let c = out.find("CLAUDE.md").unwrap();
         assert!(r < a && a < c, "docs must be ordered README→AGENTS→CLAUDE");
-        assert!(out.contains("readme body") && out.contains("agents body") && out.contains("claude body"));
+        assert!(
+            out.contains("readme body")
+                && out.contains("agents body")
+                && out.contains("claude body")
+        );
     }
 
     #[test]
@@ -1441,6 +1608,3 @@ mod tests {
     // grep/read + path-traversal guard tests live with their implementation in
     // `crate::fs_tools` (shared with the reranker), not duplicated here.
 }
-
-
-

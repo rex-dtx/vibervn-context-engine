@@ -4,7 +4,7 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use context_engine_rs::engine_boot::{boot_engine, BootOptions, BootedEngine};
+use context_engine_rs::engine_boot::{BootOptions, BootedEngine, boot_engine};
 use context_engine_rs::server;
 
 #[derive(Parser, Debug)]
@@ -92,12 +92,10 @@ async fn main() {
         }
     };
 
-    let addr: std::net::SocketAddr = format!("{bind}:{port}")
-        .parse()
-        .unwrap_or_else(|e| {
-            eprintln!("error: invalid bind address '{bind}:{port}': {e}");
-            std::process::exit(2);
-        });
+    let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap_or_else(|e| {
+        eprintln!("error: invalid bind address '{bind}:{port}': {e}");
+        std::process::exit(2);
+    });
 
     let app = server::build_router(
         home_dir,

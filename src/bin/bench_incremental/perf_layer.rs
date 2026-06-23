@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
-use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
 
 /// Captured per-stage timings (milliseconds) plus the resolve-set size (a count).
 /// Field names mirror `IndexPipelineStats` / the `PERF SUMMARY incremental` event.

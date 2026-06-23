@@ -7,21 +7,101 @@ use tracing::debug;
 
 /// Extensions considered indexable code/config.
 pub const CODE_EXTENSIONS: &[&str] = &[
-    "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "cs", "cpp", "c", "h", "hpp", "cc", "cxx", "hxx", "hh",
-    "rb", "php", "swift", "kt", "kts", "scala", "ex", "exs", "clj", "hs", "ml", "lua", "luau", "r",
-    "sh", "bash", "zsh", "fish", "ps1", "yaml", "yml", "toml", "json", "xml", "html",
-    "css", "scss", "sass", "less", "sql", "proto", "graphql", "md", "txt", "dockerfile", "tf", "hcl",
-    "vue", "svelte", "astro", "mdx", "prisma",
-    "dart", "zig", "nim", "sol", "elm", "jl", "erl", "hrl", "nix",
-    "m", "mm", "groovy", "gradle", "pl", "pm", "rst",
-    "wgsl", "glsl", "hlsl",
-    "pas", "pp", "dpr", "lpr", "dpk", "liquid",
+    "py",
+    "js",
+    "ts",
+    "tsx",
+    "jsx",
+    "rs",
+    "go",
+    "java",
+    "cs",
+    "cpp",
+    "c",
+    "h",
+    "hpp",
+    "cc",
+    "cxx",
+    "hxx",
+    "hh",
+    "rb",
+    "php",
+    "swift",
+    "kt",
+    "kts",
+    "scala",
+    "ex",
+    "exs",
+    "clj",
+    "hs",
+    "ml",
+    "lua",
+    "luau",
+    "r",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "ps1",
+    "yaml",
+    "yml",
+    "toml",
+    "json",
+    "xml",
+    "html",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "sql",
+    "proto",
+    "graphql",
+    "md",
+    "txt",
+    "dockerfile",
+    "tf",
+    "hcl",
+    "vue",
+    "svelte",
+    "astro",
+    "mdx",
+    "prisma",
+    "dart",
+    "zig",
+    "nim",
+    "sol",
+    "elm",
+    "jl",
+    "erl",
+    "hrl",
+    "nix",
+    "m",
+    "mm",
+    "groovy",
+    "gradle",
+    "pl",
+    "pm",
+    "rst",
+    "wgsl",
+    "glsl",
+    "hlsl",
+    "pas",
+    "pp",
+    "dpr",
+    "lpr",
+    "dpk",
+    "liquid",
 ];
 
 /// Non-dot directories to always skip (dot-prefixed directories are pruned by the
 /// walk filter automatically, so they do not need to appear here).
 pub const SKIP_DIRS: &[&str] = &[
-    "node_modules", "target", "build", "dist", "__pycache__", "vendor",
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "__pycache__",
+    "vendor",
 ];
 
 /// Returns true if `path` is inside a dot-prefixed directory relative to `repo_root`.
@@ -143,11 +223,25 @@ impl ChangeFilter {
         Self::new_full(repo_root, extra_extensions, HashSet::new())
     }
 
-    pub fn new_full(repo_root: &Path, extra_extensions: Vec<String>, ignore_filenames: HashSet<String>) -> Self {
-        Self::new_complete(repo_root, extra_extensions, ignore_filenames, HashSet::new())
+    pub fn new_full(
+        repo_root: &Path,
+        extra_extensions: Vec<String>,
+        ignore_filenames: HashSet<String>,
+    ) -> Self {
+        Self::new_complete(
+            repo_root,
+            extra_extensions,
+            ignore_filenames,
+            HashSet::new(),
+        )
     }
 
-    pub fn new_complete(repo_root: &Path, extra_extensions: Vec<String>, ignore_filenames: HashSet<String>, ignore_paths: HashSet<String>) -> Self {
+    pub fn new_complete(
+        repo_root: &Path,
+        extra_extensions: Vec<String>,
+        ignore_filenames: HashSet<String>,
+        ignore_paths: HashSet<String>,
+    ) -> Self {
         let mut builder = GitignoreBuilder::new(repo_root);
         let _ = builder.add(repo_root.join(".gitignore"));
         let _ = builder.add(repo_root.join(".ignore"));
@@ -211,7 +305,12 @@ pub fn walk_repo(repo_path: &str) -> Vec<String> {
     walk_repo_with(repo_path, &[], &HashSet::new(), &HashSet::new())
 }
 
-pub fn walk_repo_with(repo_path: &str, extra_extensions: &[String], ignore_filenames: &HashSet<String>, ignore_paths: &HashSet<String>) -> Vec<String> {
+pub fn walk_repo_with(
+    repo_path: &str,
+    extra_extensions: &[String],
+    ignore_filenames: &HashSet<String>,
+    ignore_paths: &HashSet<String>,
+) -> Vec<String> {
     let root = Path::new(repo_path);
     if !root.exists() {
         return vec![];
@@ -330,7 +429,11 @@ mod tests {
 
         // Root-level dot-file must be indexed.
         let has_eslintrc = result.iter().any(|p| p.ends_with(".eslintrc.json"));
-        assert!(has_eslintrc, ".eslintrc.json must be indexed (root-level dot-file); got: {:?}", result);
+        assert!(
+            has_eslintrc,
+            ".eslintrc.json must be indexed (root-level dot-file); got: {:?}",
+            result
+        );
 
         // Nothing under .claude, .agent, or .github must appear.
         for p in &result {
@@ -364,7 +467,11 @@ mod tests {
         assert!(has_main, "src/main.js must be indexed; got: {:?}", result);
 
         let has_node_modules = result.iter().any(|p| p.contains("node_modules"));
-        assert!(!has_node_modules, "node_modules content must not be indexed; got: {:?}", result);
+        assert!(
+            !has_node_modules,
+            "node_modules content must not be indexed; got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -568,24 +675,34 @@ mod tests {
         touch(root, "src/lib.rs");
 
         let repo_str = root.to_str().unwrap();
-        let ignore: HashSet<String> = ["CLAUDE.md", "AGENTS.md"].iter().map(|s| s.to_string()).collect();
-        let result: Vec<String> = walk_repo_with(repo_str, &[], &ignore, &HashSet::new()).into_iter().map(|p| fwd(&p)).collect();
+        let ignore: HashSet<String> = ["CLAUDE.md", "AGENTS.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result: Vec<String> = walk_repo_with(repo_str, &[], &ignore, &HashSet::new())
+            .into_iter()
+            .map(|p| fwd(&p))
+            .collect();
 
         assert!(
             result.iter().any(|p| p.ends_with("src/main.rs")),
-            "src/main.rs must be indexed; got: {:?}", result
+            "src/main.rs must be indexed; got: {:?}",
+            result
         );
         assert!(
             result.iter().any(|p| p.ends_with("src/lib.rs")),
-            "src/lib.rs must be indexed; got: {:?}", result
+            "src/lib.rs must be indexed; got: {:?}",
+            result
         );
         assert!(
             !result.iter().any(|p| p.ends_with("CLAUDE.md")),
-            "CLAUDE.md must be skipped; got: {:?}", result
+            "CLAUDE.md must be skipped; got: {:?}",
+            result
         );
         assert!(
             !result.iter().any(|p| p.ends_with("AGENTS.md")),
-            "AGENTS.md must be skipped; got: {:?}", result
+            "AGENTS.md must be skipped; got: {:?}",
+            result
         );
     }
 
@@ -619,21 +736,27 @@ mod tests {
         touch(root, "doc/README.md");
 
         let repo_str = root.to_str().unwrap();
-        let ignore_paths: HashSet<String> = ["doc/Building.md"].iter().map(|s| s.to_string()).collect();
+        let ignore_paths: HashSet<String> =
+            ["doc/Building.md"].iter().map(|s| s.to_string()).collect();
         let result: Vec<String> = walk_repo_with(repo_str, &[], &HashSet::new(), &ignore_paths)
-            .into_iter().map(|p| fwd(&p)).collect();
+            .into_iter()
+            .map(|p| fwd(&p))
+            .collect();
 
         assert!(
             result.iter().any(|p| p.ends_with("src/main.rs")),
-            "src/main.rs must be indexed; got: {:?}", result
+            "src/main.rs must be indexed; got: {:?}",
+            result
         );
         assert!(
             result.iter().any(|p| p.ends_with("doc/README.md")),
-            "doc/README.md must be indexed; got: {:?}", result
+            "doc/README.md must be indexed; got: {:?}",
+            result
         );
         assert!(
             !result.iter().any(|p| p.ends_with("doc/Building.md")),
-            "doc/Building.md must be skipped by ignore_paths; got: {:?}", result
+            "doc/Building.md must be skipped by ignore_paths; got: {:?}",
+            result
         );
     }
 
@@ -646,10 +769,10 @@ mod tests {
 
         // Build filter with forward-slash root (as config may store it).
         let root_fwd = root.to_str().unwrap().replace('\\', "/");
-        let ignore_paths: HashSet<String> = ["doc/Building.md"].iter().map(|s| s.to_string()).collect();
-        let filter = ChangeFilter::new_complete(
-            Path::new(&root_fwd), vec![], HashSet::new(), ignore_paths,
-        );
+        let ignore_paths: HashSet<String> =
+            ["doc/Building.md"].iter().map(|s| s.to_string()).collect();
+        let filter =
+            ChangeFilter::new_complete(Path::new(&root_fwd), vec![], HashSet::new(), ignore_paths);
 
         // Candidate as native (PathBuf::join → backslash on Windows).
         let building_native = root.join("doc").join("Building.md");
@@ -686,15 +809,18 @@ mod tests {
 
         assert!(
             result.iter().any(|p| p.ends_with("src/main.rs")),
-            "src/main.rs must be indexed; got: {:?}", result
+            "src/main.rs must be indexed; got: {:?}",
+            result
         );
         assert!(
             !result.iter().any(|p| p.ends_with("notes.md")),
-            "notes.md must be excluded by .augmentignore; got: {:?}", result
+            "notes.md must be excluded by .augmentignore; got: {:?}",
+            result
         );
         assert!(
             !result.iter().any(|p| p.contains("generated2")),
-            "generated2/leak.rs must be excluded by .augmentignore; got: {:?}", result
+            "generated2/leak.rs must be excluded by .augmentignore; got: {:?}",
+            result
         );
     }
 
@@ -724,16 +850,21 @@ mod tests {
         let result: Vec<String> = walk_repo(repo_str).into_iter().map(|p| fwd(&p)).collect();
 
         assert!(
-            result.iter().any(|p| p.ends_with("secret.rs") && !p.ends_with("also_secret.rs")),
-            "secret.rs must be re-included by .augmentignore !negation; got: {:?}", result
+            result
+                .iter()
+                .any(|p| p.ends_with("secret.rs") && !p.ends_with("also_secret.rs")),
+            "secret.rs must be re-included by .augmentignore !negation; got: {:?}",
+            result
         );
         assert!(
             !result.iter().any(|p| p.ends_with("also_secret.rs")),
-            "also_secret.rs must stay excluded by .gitignore (no negation); got: {:?}", result
+            "also_secret.rs must stay excluded by .gitignore (no negation); got: {:?}",
+            result
         );
         assert!(
             result.iter().any(|p| p.ends_with("src/main.rs")),
-            "src/main.rs control must be indexed; got: {:?}", result
+            "src/main.rs control must be indexed; got: {:?}",
+            result
         );
     }
 

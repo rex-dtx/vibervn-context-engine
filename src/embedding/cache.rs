@@ -48,7 +48,13 @@ impl EmbeddingCache {
         };
         let sanitized: String = key
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let cache_dir = embeddings_dir.join(&sanitized);
 
@@ -115,10 +121,9 @@ impl EmbeddingCache {
                     match Self::decode_embedding(&bytes) {
                         Some(embedding) => {
                             // Touch mtime so LRU-style purges keep this entry.
-                            if let Err(e) = filetime::set_file_mtime(
-                                &path,
-                                filetime::FileTime::now(),
-                            ) {
+                            if let Err(e) =
+                                filetime::set_file_mtime(&path, filetime::FileTime::now())
+                            {
                                 trace!(path = %path.display(), error = %e, "cache hit: mtime touch failed (non-fatal)");
                             }
                             hits.push((idx, embedding));
@@ -205,15 +210,20 @@ impl EmbeddingCache {
     ///
     /// Empty shard directories are removed after file deletion (best-effort).
     /// Returns the count of deleted files and the count of errors.
-    pub fn purge_global(embeddings_dir: &Path, older_than: Option<std::time::Duration>) -> PurgeResult {
+    pub fn purge_global(
+        embeddings_dir: &Path,
+        older_than: Option<std::time::Duration>,
+    ) -> PurgeResult {
         let root = embeddings_dir.to_path_buf();
 
         if !root.exists() {
-            return PurgeResult { deleted: 0, errors: 0 };
+            return PurgeResult {
+                deleted: 0,
+                errors: 0,
+            };
         }
 
-        let cutoff: Option<SystemTime> =
-            older_than.map(|d| SystemTime::now() - d);
+        let cutoff: Option<SystemTime> = older_than.map(|d| SystemTime::now() - d);
 
         let mut deleted: u64 = 0;
         let mut errors: u64 = 0;
@@ -252,9 +262,7 @@ impl EmbeddingCache {
                     let should_delete = match cutoff {
                         None => true,
                         Some(cutoff_time) => {
-                            match std::fs::metadata(&path)
-                                .and_then(|m| m.modified())
-                            {
+                            match std::fs::metadata(&path).and_then(|m| m.modified()) {
                                 Ok(mtime) => mtime < cutoff_time,
                                 Err(e) => {
                                     warn!(path = %path.display(), error = %e, "purge_global: metadata failed; skipping");
@@ -313,8 +321,10 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         // Same model name, two different non-default dimensions, plus no-override.
         let none = EmbeddingCache::new(tmp.path(), "text-embedding-3-large", None).expect("cache");
-        let d512 = EmbeddingCache::new(tmp.path(), "text-embedding-3-large", Some(512)).expect("cache");
-        let d1024 = EmbeddingCache::new(tmp.path(), "text-embedding-3-large", Some(1024)).expect("cache");
+        let d512 =
+            EmbeddingCache::new(tmp.path(), "text-embedding-3-large", Some(512)).expect("cache");
+        let d1024 =
+            EmbeddingCache::new(tmp.path(), "text-embedding-3-large", Some(1024)).expect("cache");
 
         // Each resolves to a different on-disk directory so vectors of differing
         // length never share a `.bin` pool.
@@ -449,6 +459,9 @@ mod tests {
         let result2 = EmbeddingCache::purge_global(tmp.path(), None);
         assert_eq!(result2.deleted, 1, "one remaining entry should be deleted");
         assert_eq!(result2.errors, 0);
-        assert!(!fresh_path.exists(), "fresh entry must be gone after unconditional purge");
+        assert!(
+            !fresh_path.exists(),
+            "fresh entry must be gone after unconditional purge"
+        );
     }
 }

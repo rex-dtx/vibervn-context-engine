@@ -136,7 +136,9 @@ pub async fn graph_expand(
             let caller_score = score * CALLER_SCORE_FACTOR;
             if caller_score >= SCORE_FLOOR {
                 callers_queries += 1;
-                let callers = query_callers(db, &fqn, schema_version).await.unwrap_or_default();
+                let callers = query_callers(db, &fqn, schema_version)
+                    .await
+                    .unwrap_or_default();
                 for caller_fqn in callers {
                     if global_seen.contains(&caller_fqn) {
                         continue;
@@ -159,7 +161,9 @@ pub async fn graph_expand(
             let callee_score = score * CALLEE_SCORE_FACTOR;
             if callee_score >= SCORE_FLOOR {
                 callees_queries += 1;
-                let callees = query_callees(db, &fqn, schema_version).await.unwrap_or_default();
+                let callees = query_callees(db, &fqn, schema_version)
+                    .await
+                    .unwrap_or_default();
                 for callee_fqn in callees {
                     if global_seen.contains(&callee_fqn) {
                         continue;
@@ -258,19 +262,21 @@ async fn query_callers(db: &Surreal<Db>, fqn: &str, schema_version: u32) -> Resu
         // Slow fallback for v1 DBs (link-deref on the `in` record).
         let name = fqn.rsplit("::").next().unwrap_or(fqn);
         #[derive(Deserialize)]
-        struct V1Row { in_file: String }
+        struct V1Row {
+            in_file: String,
+        }
         let v1_rows: Vec<V1Row> = db
             .query("SELECT in_file FROM calls WHERE out.name = $name LIMIT 20")
             .bind(("name", name.to_string()))
             .await?
             .take(0)?;
-        return Ok(v1_rows.into_iter().map(|r| format!("{}::{}", r.in_file, name)).collect());
+        return Ok(v1_rows
+            .into_iter()
+            .map(|r| format!("{}::{}", r.in_file, name))
+            .collect());
     };
 
-    let callers: Vec<String> = rows
-        .into_iter()
-        .map(|r| r.in_name)
-        .collect();
+    let callers: Vec<String> = rows.into_iter().map(|r| r.in_name).collect();
     Ok(callers)
 }
 
@@ -293,19 +299,21 @@ async fn query_callees(db: &Surreal<Db>, fqn: &str, schema_version: u32) -> Resu
         // Slow fallback for v1 DBs (link-deref on the `out` record).
         let name = fqn.rsplit("::").next().unwrap_or(fqn);
         #[derive(Deserialize)]
-        struct V1Row { out_file: String }
+        struct V1Row {
+            out_file: String,
+        }
         let v1_rows: Vec<V1Row> = db
             .query("SELECT out_file FROM calls WHERE in.name = $name LIMIT 20")
             .bind(("name", name.to_string()))
             .await?
             .take(0)?;
-        return Ok(v1_rows.into_iter().map(|r| format!("{}::{}", r.out_file, name)).collect());
+        return Ok(v1_rows
+            .into_iter()
+            .map(|r| format!("{}::{}", r.out_file, name))
+            .collect());
     };
 
-    let callees: Vec<String> = rows
-        .into_iter()
-        .map(|r| r.out_name)
-        .collect();
+    let callees: Vec<String> = rows.into_iter().map(|r| r.out_name).collect();
     Ok(callees)
 }
 
@@ -319,10 +327,8 @@ async fn fetch_chunk_for_fqn(
     // `rfind("::")` split, which mis-derived file_prefix for methods/namespaced
     // symbols (e.g. "x.cpp::Foo::bar" → file "x.cpp::Foo", matching no file) and
     // silently dropped every method-target expansion.
-    let thing = surrealdb::sql::Thing::from((
-        "symbol",
-        surrealdb::sql::Id::String(fqn.to_string()),
-    ));
+    let thing =
+        surrealdb::sql::Thing::from(("symbol", surrealdb::sql::Id::String(fqn.to_string())));
 
     // Direct record fetch via `FROM $thing` — NOT `FROM symbol WHERE id = $thing`.
     // SurrealDB 2.6.5 does NOT optimize `WHERE id = $thing` into a primary-key lookup:
@@ -396,10 +402,8 @@ mod tests {
         line_start: i64,
         line_end: i64,
     ) {
-        let thing = surrealdb::sql::Thing::from((
-            "symbol",
-            surrealdb::sql::Id::String(fqn.to_string()),
-        ));
+        let thing =
+            surrealdb::sql::Thing::from(("symbol", surrealdb::sql::Id::String(fqn.to_string())));
         db.query(
             "CREATE $t SET name = $n, kind = 'method', file = $f, \
              line_start = $ls, line_end = $le, signature = NONE, parent = NONE",
@@ -420,15 +424,13 @@ mod tests {
         line_end: i64,
         content: &str,
     ) {
-        db.query(
-            "CREATE chunk SET file = $f, line_start = $ls, line_end = $le, content = $c",
-        )
-        .bind(("f", file.to_string()))
-        .bind(("ls", line_start))
-        .bind(("le", line_end))
-        .bind(("c", content.to_string()))
-        .await
-        .expect("insert chunk");
+        db.query("CREATE chunk SET file = $f, line_start = $ls, line_end = $le, content = $c")
+            .bind(("f", file.to_string()))
+            .bind(("ls", line_start))
+            .bind(("le", line_end))
+            .bind(("c", content.to_string()))
+            .await
+            .expect("insert chunk");
     }
 
     /// Locks the fix: `fetch_chunk_for_fqn` must resolve a symbol whose id is a
@@ -470,7 +472,9 @@ mod tests {
     #[tokio::test]
     async fn fetch_chunk_for_fqn_dedups_against_base_keys() {
         let home = TempDir::new().unwrap();
-        let db = open_db(home.path(), "/test/graph_expand_dedup", 0).await.unwrap();
+        let db = open_db(home.path(), "/test/graph_expand_dedup", 0)
+            .await
+            .unwrap();
 
         let fqn = "x.cpp::Foo::bar";
         let file = "x.cpp";

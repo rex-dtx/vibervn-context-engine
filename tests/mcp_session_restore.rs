@@ -21,10 +21,8 @@ use std::sync::Arc;
 
 use rmcp::handler::server::ServerHandler;
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    SessionManager,
-    session::local::LocalSessionManager,
-    session::store::SessionStore,
+    SessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    session::local::LocalSessionManager, session::store::SessionStore,
 };
 use tokio::net::TcpListener;
 
@@ -54,11 +52,7 @@ async fn start_mcp_server() -> (
     let mut config = StreamableHttpServerConfig::default();
     config.session_store = Some(store.clone());
 
-    let service = StreamableHttpService::new(
-        || Ok(TestHandler),
-        manager.clone(),
-        config,
-    );
+    let service = StreamableHttpService::new(|| Ok(TestHandler), manager.clone(), config);
 
     let app = axum::Router::new().nest_service("/mcp", service);
 
@@ -136,7 +130,10 @@ async fn idle_dropped_session_is_restored_not_404() {
 
     // Sanity: the live session exists and the store has its params.
     assert!(
-        manager.has_session(&session_id.clone().into()).await.unwrap(),
+        manager
+            .has_session(&session_id.clone().into())
+            .await
+            .unwrap(),
         "session should be live right after initialize"
     );
     assert!(
@@ -155,7 +152,10 @@ async fn idle_dropped_session_is_restored_not_404() {
     // 3. Precondition for a meaningful test: the worker is gone but the store
     //    entry survives — this is the exact state that used to produce 404.
     assert!(
-        !manager.has_session(&session_id.clone().into()).await.unwrap(),
+        !manager
+            .has_session(&session_id.clone().into())
+            .await
+            .unwrap(),
         "worker must be dropped from the live map after close_session"
     );
     assert!(
@@ -194,6 +194,3 @@ async fn unknown_session_id_still_404s() {
         "a session id absent from the store must 404, not be fabricated"
     );
 }
-
-
-

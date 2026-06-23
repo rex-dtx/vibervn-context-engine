@@ -1,5 +1,5 @@
-pub mod voyage;
 pub mod cache;
+pub mod voyage;
 
 // Re-export the transient-exhausted marker so the pipeline can classify errors.
 pub use voyage::TransientEmbedExhausted;

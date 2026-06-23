@@ -25,12 +25,12 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use context_engine_rs::engine_boot::{boot_engine, BootOptions, BootedEngine};
+use context_engine_rs::engine_boot::{BootOptions, BootedEngine, boot_engine};
 use context_engine_rs::engine_ops;
 use context_engine_rs::indexing::IndexState;
 use context_engine_rs::store;
-use surrealdb::engine::local::Db;
 use surrealdb::Surreal;
+use surrealdb::engine::local::Db;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -345,7 +345,9 @@ async fn wait_for_index(
                 }
                 IndexState::Indexing => { /* in progress — keep polling */ }
                 IndexState::Error => {
-                    let detail = s.error.unwrap_or_else(|| "unknown indexing error".to_string());
+                    let detail = s
+                        .error
+                        .unwrap_or_else(|| "unknown indexing error".to_string());
                     if looks_like_lock_conflict(&detail) {
                         return Some(lock_conflict_guidance(data_dir, &detail));
                     }
@@ -438,7 +440,11 @@ fn classify_plan(plan: &[serde_json::Value]) -> (bool, bool, String) {
     } else if plan_str.contains("Iterate Table") {
         (false, true, "Iterate Table (FULL TABLE SCAN)".to_string())
     } else {
-        (false, false, "no Iterate Index / Iterate Table operation found".to_string())
+        (
+            false,
+            false,
+            "no Iterate Index / Iterate Table operation found".to_string(),
+        )
     }
 }
 
@@ -619,7 +625,9 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
     };
 
     // ── Predicate 1: calls callers — WHERE out_name = $fqn ───────────────────
-    section("PREDICATE 1: calls callers — SELECT in_name FROM calls WHERE out_name = $fqn LIMIT 20");
+    section(
+        "PREDICATE 1: calls callers — SELECT in_name FROM calls WHERE out_name = $fqn LIMIT 20",
+    );
     match &fqn {
         Some(fqn) => {
             println!("bound $fqn = {fqn:?}");
@@ -635,7 +643,10 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
                         serde_json::to_string_pretty(&plan).unwrap_or_default()
                     );
                     let (uses_idx, found, detail) = classify_plan(&plan);
-                    println!("VERDICT: {} — {detail}", if uses_idx { "INDEX" } else { "SCAN" });
+                    println!(
+                        "VERDICT: {} — {detail}",
+                        if uses_idx { "INDEX" } else { "SCAN" }
+                    );
                     if !found {
                         all_ok = false;
                     }
@@ -656,13 +667,17 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
             }
         }
         None => {
-            eprintln!("error: no real $fqn available (calls table empty or out_name all NONE) — cannot run predicate 1");
+            eprintln!(
+                "error: no real $fqn available (calls table empty or out_name all NONE) — cannot run predicate 1"
+            );
             all_ok = false;
         }
     }
 
     // ── Predicate 2: calls callees — WHERE in_name = $fqn ────────────────────
-    section("PREDICATE 2: calls callees — SELECT out_name FROM calls WHERE in_name = $fqn LIMIT 20");
+    section(
+        "PREDICATE 2: calls callees — SELECT out_name FROM calls WHERE in_name = $fqn LIMIT 20",
+    );
     match &fqn {
         Some(fqn) => {
             println!("bound $fqn = {fqn:?}");
@@ -678,7 +693,10 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
                         serde_json::to_string_pretty(&plan).unwrap_or_default()
                     );
                     let (uses_idx, found, detail) = classify_plan(&plan);
-                    println!("VERDICT: {} — {detail}", if uses_idx { "INDEX" } else { "SCAN" });
+                    println!(
+                        "VERDICT: {} — {detail}",
+                        if uses_idx { "INDEX" } else { "SCAN" }
+                    );
                     if !found {
                         all_ok = false;
                     }
@@ -753,7 +771,9 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
             }
         }
         None => {
-            eprintln!("error: no real symbol row available (symbol table empty) — cannot run predicate 3");
+            eprintln!(
+                "error: no real symbol row available (symbol table empty) — cannot run predicate 3"
+            );
             all_ok = false;
         }
     }
@@ -790,7 +810,10 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
                         serde_json::to_string_pretty(&plan).unwrap_or_default()
                     );
                     let (uses_idx, found, detail) = classify_plan(&plan);
-                    println!("VERDICT: {} — {detail}", if uses_idx { "INDEX" } else { "SCAN" });
+                    println!(
+                        "VERDICT: {} — {detail}",
+                        if uses_idx { "INDEX" } else { "SCAN" }
+                    );
                     if !found {
                         all_ok = false;
                     }
@@ -825,9 +848,7 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
     //    $thing` plan may be neither "Iterate Index" nor "Iterate Table" (e.g. an
     //    "Iterate Value"/"Fetch" op) — in that case the verdict is DIRECT/OTHER and
     //    the EXEC time is what matters. ─────────────────────────────────────────
-    section(
-        "PREDICATE 5 (proposed fix): direct record access — SELECT ... FROM $thing LIMIT 1",
-    );
+    section("PREDICATE 5 (proposed fix): direct record access — SELECT ... FROM $thing LIMIT 1");
     match &thing {
         Some(thing) => {
             println!("bound $thing = {thing}");
@@ -908,7 +929,10 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
                         serde_json::to_string_pretty(&plan).unwrap_or_default()
                     );
                     let (uses_idx, found, detail) = classify_plan(&plan);
-                    println!("VERDICT: {} — {detail}", if uses_idx { "INDEX" } else { "SCAN" });
+                    println!(
+                        "VERDICT: {} — {detail}",
+                        if uses_idx { "INDEX" } else { "SCAN" }
+                    );
                     if !found {
                         all_ok = false;
                     }
@@ -943,7 +967,9 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
     // ── Summary ──────────────────────────────────────────────────────────────
     section("SUMMARY");
     if all_ok {
-        println!("all verdicts determined — see VERDICT lines and EXEC timings above for index vs scan and per-query latency.");
+        println!(
+            "all verdicts determined — see VERDICT lines and EXEC timings above for index vs scan and per-query latency."
+        );
         0
     } else {
         eprintln!(
@@ -953,9 +979,3 @@ async fn diagnose_graph(db: &Surreal<Db>, repo: &str) -> i32 {
         6
     }
 }
-
-
-
-
-
-

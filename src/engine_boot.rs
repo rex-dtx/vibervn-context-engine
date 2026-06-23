@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::config::{
-    default_data_dir, default_embeddings_dir, ensure_dir_and_load, ensure_machine_id, Settings,
+    Settings, default_data_dir, default_embeddings_dir, ensure_dir_and_load, ensure_machine_id,
 };
 use crate::indexing::IndexEngine;
 use crate::store;
@@ -197,7 +197,11 @@ pub async fn boot_engine(opts: BootOptions) -> Result<BootedEngine> {
     // blocking removal here can't race a live datastore. Runs synchronously before
     // IndexEngine::start so the first index never collides with a leftover. Skips
     // (doesn't error) any directory it still can't remove; the next boot retries.
-    store::sweep_stale_generations(&data_dir, &boot_settings.repos, &boot_settings.repo_generations);
+    store::sweep_stale_generations(
+        &data_dir,
+        &boot_settings.repos,
+        &boot_settings.repo_generations,
+    );
 
     // Start IndexEngine — spawns watchers for all configured repos (unless
     // `no_watchers` is set, e.g. by the bench oracle for measurement isolation).

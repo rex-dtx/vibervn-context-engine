@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
-use crate::config::{config_path, write_settings_atomic, Settings};
+use crate::config::{Settings, config_path, write_settings_atomic};
 use crate::embedding::voyage::VoyageClient;
 use crate::indexing::IndexEngine;
 use crate::llm::LlmClient;

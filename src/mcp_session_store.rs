@@ -232,4 +232,3 @@ mod tests {
         assert!(s.load("k1").await.unwrap().is_some());
     }
 }
-
