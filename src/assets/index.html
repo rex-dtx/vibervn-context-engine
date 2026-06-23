@@ -930,210 +930,7 @@
 
     <!-- Sub-tab: MCP -->
     <div role="tabpanel" id="subpanel-claude" class="hidden">
-
-      <!-- Repo MCP sub-tab bar -->
-      <div role="tablist" id="tablist-repo-mcp" class="flex border-b border-gray-200 dark:border-wiki-border mb-6">
-        <button role="tab" id="repo-mcptab-claude" aria-selected="true" aria-controls="repo-mcppanel-claude" data-i18n="mcp.claudeCode"
-                class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-blue-600 dark:border-wiki-border-active text-gray-900 dark:text-wiki-heading
-                       focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Claude Code
-        </button>
-        <button role="tab" id="repo-mcptab-codex" aria-selected="false" aria-controls="repo-mcppanel-codex" data-i18n="mcp.codex"
-                class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
-                       hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
-                       focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Codex
-        </button>
-        <button role="tab" id="repo-mcptab-opencode" aria-selected="false" aria-controls="repo-mcppanel-opencode" data-i18n="mcp.opencode"
-                class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
-                       hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
-                       focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Opencode
-        </button>
-        <button role="tab" id="repo-mcptab-endpoint" aria-selected="false" aria-controls="repo-mcppanel-endpoint" data-i18n="mcp.endpoint"
-                class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
-                       hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
-                       focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Endpoint
-        </button>
-        <button role="tab" id="repo-mcptab-test" aria-selected="false" aria-controls="repo-mcppanel-test" data-i18n="mcp.test"
-                class="rmcptab-btn px-4 py-2 text-sm border-b-2 border-transparent text-gray-500 dark:text-wiki-text-muted
-                       hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border
-                       focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Test
-        </button>
-      </div>
-
-      <!-- Repo MCP sub-panel: Endpoint -->
-      <div role="tabpanel" id="repo-mcppanel-endpoint" class="hidden">
-        <p data-i18n="mcp.endpointDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
-          Streamable-HTTP MCP endpoint. Point any MCP-compatible client here.
-        </p>
-        <div class="relative">
-          <code id="repo-mcp-endpoint-url"
-                class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
-                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all break-all"></code>
-          <button id="btn-copy-repo-endpoint" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
-                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
-                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
-                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- Repo MCP sub-panel: Claude Code -->
-      <div role="tabpanel" id="repo-mcppanel-claude">
-        <p data-i18n="repo.claudeCmdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
-          Run this command in your terminal to register the MCP server with Claude Code for this project.
-        </p>
-        <div class="relative">
-          <code id="repo-claude-cmd"
-                class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
-                       bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-all"></code>
-          <button id="btn-copy-repo-claude" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
-                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
-                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
-                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-
-        <p data-i18n="repo.claudeAcceptDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-3">
-          Then start Claude Code in your terminal — it will detect the new MCP server and ask you to approve it. Accept once to enable codebase-retrieval for this project.
-        </p>
-
-        <p data-i18n-html="mcp.claudeMdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">
-          Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">CLAUDE.md</code> so Claude prefers the context engine for codebase exploration.
-        </p>
-        <div class="relative">
-          <pre id="repo-claude-md"
-               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
-                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
-          <button id="btn-copy-repo-claude-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
-                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
-                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
-                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- Repo MCP sub-panel: Codex -->
-      <div role="tabpanel" id="repo-mcppanel-codex" class="hidden">
-        <p data-i18n-html="repo.codexConfigDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
-          Add the following to this project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">.codex/config.toml</code>.
-        </p>
-        <div class="relative">
-          <pre id="repo-codex-config"
-               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
-                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
-          <button id="btn-copy-repo-codex-config" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
-                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
-                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
-                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-
-        <p data-i18n-html="mcp.agentsMdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">
-          Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code> so Codex prefers the context engine for codebase exploration.
-        </p>
-        <div class="relative">
-          <pre id="repo-agents-md"
-               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
-                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
-          <button id="btn-copy-repo-agents-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
-                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
-                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
-                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- Repo MCP sub-panel: Opencode -->
-      <div role="tabpanel" id="repo-mcppanel-opencode" class="hidden">
-        <p data-i18n-html="repo.opencodeConfigDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
-          Add the following to this project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">opencode.json</code>.
-        </p>
-        <div class="relative">
-          <pre id="repo-opencode-config"
-               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
-                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
-          <button id="btn-copy-repo-opencode-config" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
-                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
-                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
-                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-
-        <p data-i18n-html="mcp.opencodeAgentsMdDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">
-          Add the following to your project's <code class="font-mono text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-wiki-surface">AGENTS.md</code> so Opencode prefers the context engine for codebase exploration.
-        </p>
-        <div class="relative">
-          <pre id="repo-opencode-agents-md"
-               class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
-                      bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
-          <button id="btn-copy-repo-opencode-agents-md" data-i18n-title="action.copy" data-i18n-aria="action.copy" title="Copy" aria-label="Copy"
-                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
-                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
-                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
-                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- Repo MCP sub-panel: Test -->
-      <div role="tabpanel" id="repo-mcppanel-test" class="hidden">
-        <p data-i18n="mcp.testDesc" class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">
-          Send a request directly to the MCP tool and see the raw output.
-        </p>
-        <div class="space-y-3">
-          <div>
-            <label for="repo-mcp-test-tool-select" class="block text-xs text-gray-500 dark:text-wiki-text-muted mb-1">Tool</label>
-            <select id="repo-mcp-test-tool-select"
-                    class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface rounded px-3 py-2 text-sm
-                           text-gray-900 dark:text-wiki-text focus:outline-none focus:ring-2 focus:ring-blue-400">
-              <option value="codebase-retrieval">codebase-retrieval</option>
-              <option value="file-retrieval">file-retrieval</option>
-            </select>
-          </div>
-          <div id="repo-mcp-test-file-path-group" class="hidden">
-            <label for="repo-mcp-test-file-path" class="block text-xs text-gray-500 dark:text-wiki-text-muted mb-1">file_path</label>
-            <input id="repo-mcp-test-file-path" type="text" placeholder="src/main.rs"
-                   class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface rounded px-3 py-2 text-sm
-                          text-gray-900 dark:text-wiki-text placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted
-                          focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />
-          </div>
-          <div>
-            <label for="repo-mcp-test-query" class="block text-xs text-gray-500 dark:text-wiki-text-muted mb-1">information_request</label>
-            <input id="repo-mcp-test-query" type="text" data-i18n-ph="mcp.testQueryPlaceholder"
-                   placeholder="e.g. Where is authentication handled?"
-                   class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface rounded px-3 py-2 text-sm
-                          text-gray-900 dark:text-wiki-text placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted
-                          focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />
-          </div>
-        </div>
-        <button id="btn-repo-mcp-run" data-i18n="action.run"
-                class="mt-3 px-4 py-2 bg-blue-600 dark:bg-wiki-border-active/20 dark:border dark:border-wiki-border-active text-white dark:text-wiki-link text-sm rounded
-                       hover:bg-blue-700 dark:hover:bg-wiki-border-active/30 focus:outline-none focus:ring-2 focus:ring-blue-400
-                       disabled:opacity-50 disabled:cursor-not-allowed">
-          Run
-        </button>
-        <div id="repo-mcp-test-error" class="hidden mt-3 text-sm text-red-600 dark:text-red-400"></div>
-        <pre id="repo-mcp-test-output"
-             class="hidden mt-4 text-xs p-3 border border-gray-200 dark:border-wiki-border rounded bg-white dark:bg-wiki-surface
-                    text-gray-800 dark:text-wiki-text font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap max-h-[600px] overflow-y-auto"></pre>
-      </div>
+      <div id="repo-mcp-detail-root"></div>
 
     </div>
 
@@ -1255,11 +1052,30 @@
   </div>
 </div>
 
+<!-- Repo MCP Dialog -->
+<div id="modal-repo-mcp" class="hidden fixed inset-0 z-[125] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+     role="dialog" aria-modal="true" aria-labelledby="repo-mcp-modal-title">
+  <div class="w-full max-w-3xl mx-4 bg-white dark:bg-wiki-surface border border-gray-200 dark:border-wiki-border rounded-lg shadow-2xl flex flex-col"
+       style="height: min(86vh, 760px);">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-wiki-border">
+      <h3 id="repo-mcp-modal-title" data-i18n="tab.mcp" class="text-sm font-medium text-gray-900 dark:text-wiki-heading">MCP</h3>
+      <span id="repo-mcp-modal-repo-name" class="font-mono text-xs text-gray-400 dark:text-wiki-text-muted truncate flex-1 mx-3 text-right"></span>
+      <button id="btn-close-repo-mcp-modal" data-i18n-aria="action.close" data-i18n-title="action.close" aria-label="Close" title="Close"
+              class="text-gray-400 dark:text-wiki-text-muted hover:text-gray-700 dark:hover:text-wiki-text focus:outline-none focus:ring-2 focus:ring-blue-400 rounded p-1">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="repo-mcp-modal-root" class="px-4 py-4 overflow-y-auto flex-1"></div>
+  </div>
+</div>
+
 <script>
 // ─── State ────────────────────────────────────────────────────────────────
 let cfg = null;
 let saveTimer = null;
 let indexStatuses = {}; // keyed by repo path
+let currentMcpModalRepo = null;
+let repoMcpModalPrevBodyOverflow = '';
 // Repos the user triggered that the consumer hasn't picked up yet. The backend
 // has no "queued" state (only Idle/Indexing/Error), so /api/index-status reports
 // a waiting repo as plain `idle` — without this client-side set the optimistic
@@ -1465,10 +1281,12 @@ const STR = {
 
   // Repo row
   'repo.index':        { en: `Index`, vi: `Index`, zh: `索引` },
+  'repo.openMcp':      { en: `Open MCP`, vi: `Mở MCP`, zh: `打开 MCP` },
   'repo.queued':       { en: `Queued…`, vi: `Đang chờ…`, zh: `已排队…` },
   'repo.cancelling':   { en: `Cancelling…`, vi: `Đang hủy…`, zh: `正在取消…` },
   'repo.removeIndex':  { en: `Remove Indexes`, vi: `Xóa index`, zh: `移除索引` },
   'repo.removeRepo':   { en: `Remove Repo`, vi: `Xóa repo`, zh: `移除仓库` },
+  'repo.removeOptions': { en: `Remove options`, vi: `Tùy chọn xóa`, zh: `移除选项` },
   'repo.notIndexed':   { en: `Not indexed`, vi: `Chưa index`, zh: `未索引` },
   'repo.error':        { en: `Error`, vi: `Lỗi`, zh: `错误` },
   'repo.files':        { en: `{n} files`, vi: `{n} file`, zh: `{n} 个文件` },
@@ -1727,6 +1545,7 @@ function refreshDynamicI18n() {
   if (currentSearchRepo && !document.getElementById('search-page').classList.contains('hidden')) {
     if (!document.getElementById('subpanel-explorer').classList.contains('hidden')) loadExplorer();
   }
+  refreshVisibleRepoMcpInstances();
   updateRepoIndexUI();
 }
 
@@ -2121,9 +1940,19 @@ function renderRepos() {
                      focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-40 disabled:cursor-not-allowed">
         ${escHtml(t('repo.index'))}
       </button>
+      <button data-repo="${escHtml(repo)}" title="${escHtml(t('repo.openMcp'))}" aria-label="${escHtml(t('repo.openMcp'))}"
+              class="btn-open-repo-mcp text-xs px-2 py-1 rounded border border-gray-300 dark:border-wiki-border
+                     text-gray-600 dark:text-wiki-text-muted hover:bg-gray-100 dark:hover:bg-wiki-surface/60
+                     hover:text-gray-900 dark:hover:text-wiki-text
+                     focus:outline-none focus:ring-2 focus:ring-blue-400">
+        ${escHtml(t('tab.mcp'))}
+      </button>
       <div class="relative">
-        <button data-idx="${idx}" class="btn-remove-toggle text-gray-400 dark:text-wiki-text-muted hover:text-red-500 dark:hover:text-red-400 text-xs
-                focus:outline-none focus:ring-2 focus:ring-red-300 rounded px-2 py-1">${escHtml(t('action.remove'))}</button>
+        <button data-idx="${idx}" title="${escHtml(t('repo.removeOptions'))}" aria-label="${escHtml(t('repo.removeOptions'))}"
+                class="btn-remove-toggle inline-flex items-center justify-center w-7 h-7 text-gray-400 dark:text-wiki-text-muted hover:text-red-500 dark:hover:text-red-400
+                       focus:outline-none focus:ring-2 focus:ring-red-300 rounded">
+          <svg viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+        </button>
         <div data-idx="${idx}" class="remove-dropdown hidden absolute right-0 top-full mt-1 z-50 min-w-[140px] border border-gray-200 dark:border-wiki-border rounded bg-white dark:bg-wiki-surface shadow-lg py-1">
           <button data-repo="${escHtml(repo)}" class="btn-remove-index w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-wiki-text hover:bg-gray-100 dark:hover:bg-wiki-bg">${escHtml(t('repo.removeIndex'))}</button>
           <button data-repo="${escHtml(repo)}" data-idx="${idx}" class="btn-remove-repo w-full text-left px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-wiki-bg">${escHtml(t('repo.removeRepo'))}</button>
@@ -2139,6 +1968,10 @@ function renderRepos() {
 
   list.querySelectorAll('.btn-open-search').forEach(btn => {
     btn.addEventListener('click', () => openRepoSearch(btn.dataset.repo));
+  });
+
+  list.querySelectorAll('.btn-open-repo-mcp').forEach(btn => {
+    btn.addEventListener('click', () => openRepoMcpModal(btn.dataset.repo));
   });
 
   list.querySelectorAll('.btn-show-progress').forEach(btn => {
@@ -3451,6 +3284,7 @@ function syncEnabledMcpTools() {
   if (document.getElementById('mcp-tool-file-retrieval').checked) tools.push('file-retrieval');
   cfg.enabled_mcp_tools = tools;
   saveNow();
+  refreshVisibleRepoMcpInstances();
 }
 document.getElementById('mcp-tool-codebase-retrieval').addEventListener('change', syncEnabledMcpTools);
 document.getElementById('mcp-tool-file-retrieval').addEventListener('change', syncEnabledMcpTools);
@@ -3644,11 +3478,12 @@ function buildClaudeMdSnippet() {
 }
 
 // Check (success) glyph swapped in after a copy, restored after 1.5s.
+const COPY_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const COPY_CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><polyline points="20 6 9 17 4 12"/></svg>';
 // Copy-button helper: write text to clipboard, flash a check icon for 1.5s.
 // Icon buttons carry an inline SVG (no text), so we swap innerHTML, not textContent.
-function makeCopyBtn(btnId, getTextFn) {
-  const btn = document.getElementById(btnId);
+function makeCopyBtn(btnOrId, getTextFn) {
+  const btn = typeof btnOrId === 'string' ? document.getElementById(btnOrId) : btnOrId;
   if (!btn) return;
   btn.addEventListener('click', () => {
     navigator.clipboard.writeText(getTextFn()).then(() => {
@@ -3699,63 +3534,287 @@ SUBTABS.forEach((t, i) => {
 
 // ─── Repo MCP tab ─────────────────────────────────────────────────────────
 function initRepoMcpTab() {
-  if (!currentSearchRepo) return;
-  const origin = window.location.origin;
-  const repoName = sanitizeRepoName(currentSearchRepo);
-  const endpointUrl = origin + '/mcp-repo/' + repoName;
-  const cmd = 'claude mcp add --scope project --transport http codebase-retrieval ' + endpointUrl;
-  document.getElementById('repo-mcp-endpoint-url').textContent = endpointUrl;
-  document.getElementById('repo-claude-cmd').textContent = cmd;
-  document.getElementById('repo-codex-config').textContent = buildCodexConfigSnippet(endpointUrl);
-  document.getElementById('repo-opencode-config').textContent = buildOpencodeConfigSnippet(endpointUrl);
-  document.getElementById('repo-agents-md').textContent = buildAgentsMdSnippet();
-  document.getElementById('repo-opencode-agents-md').textContent = buildAgentsMdSnippet();
-  document.getElementById('repo-claude-md').textContent = buildClaudeMdSnippet();
-  activateRepoMcpTab(0);
+  renderRepoMcpComponent(document.getElementById('repo-mcp-detail-root'), {
+    prefix: 'detail',
+    getRepo: () => currentSearchRepo,
+  });
 }
 
-// Repo MCP sub-tab switching
+function openRepoMcpModal(repo) {
+  if (!repo) return;
+  currentMcpModalRepo = repo;
+  const modal = document.getElementById('modal-repo-mcp');
+  document.getElementById('repo-mcp-modal-repo-name').textContent = repo;
+  if (modal.classList.contains('hidden')) {
+    repoMcpModalPrevBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+  }
+  modal.classList.remove('hidden');
+  renderRepoMcpComponent(document.getElementById('repo-mcp-modal-root'), {
+    prefix: 'modal',
+    getRepo: () => currentMcpModalRepo,
+  });
+  setTimeout(() => {
+    if (!modal.classList.contains('hidden')) document.getElementById('btn-close-repo-mcp-modal').focus();
+  }, 50);
+}
+
+function closeRepoMcpModal() {
+  const modal = document.getElementById('modal-repo-mcp');
+  if (modal.classList.contains('hidden')) return;
+  modal.classList.add('hidden');
+  document.getElementById('repo-mcp-modal-root').innerHTML = '';
+  document.getElementById('repo-mcp-modal-repo-name').textContent = '';
+  currentMcpModalRepo = null;
+  document.body.style.overflow = repoMcpModalPrevBodyOverflow;
+  repoMcpModalPrevBodyOverflow = '';
+}
+
+function refreshVisibleRepoMcpInstances() {
+  const detailRoot = document.getElementById('repo-mcp-detail-root');
+  if (detailRoot && detailRoot.dataset.mcpRendered === '1' && currentSearchRepo) {
+    initRepoMcpTab();
+  }
+  const modal = document.getElementById('modal-repo-mcp');
+  if (modal && !modal.classList.contains('hidden') && currentMcpModalRepo) {
+    renderRepoMcpComponent(document.getElementById('repo-mcp-modal-root'), {
+      prefix: 'modal',
+      getRepo: () => currentMcpModalRepo,
+    });
+  }
+}
+
+// Repo MCP sub-tab definitions. IDs are generated per component instance so
+// repo detail and modal can coexist without duplicate IDs or shared listeners.
 const REPO_MCP_TABS = [
-  { btn: 'repo-mcptab-claude',   panel: 'repo-mcppanel-claude' },
-  { btn: 'repo-mcptab-codex',    panel: 'repo-mcppanel-codex' },
-  { btn: 'repo-mcptab-opencode', panel: 'repo-mcppanel-opencode' },
-  { btn: 'repo-mcptab-endpoint', panel: 'repo-mcppanel-endpoint' },
-  { btn: 'repo-mcptab-test',     panel: 'repo-mcppanel-test' },
+  { key: 'claude', labelKey: 'mcp.claudeCode' },
+  { key: 'codex', labelKey: 'mcp.codex' },
+  { key: 'opencode', labelKey: 'mcp.opencode' },
+  { key: 'endpoint', labelKey: 'mcp.endpoint' },
+  { key: 'test', labelKey: 'mcp.test' },
 ];
 
-function activateRepoMcpTab(idx) {
+function repoMcpId(prefix, kind, key) {
+  return `${prefix}-mcp-${kind}-${key}`;
+}
+
+function repoMcpTabClass(active) {
+  const base = 'rmcptab-btn px-4 py-2 text-sm border-b-2 focus:outline-none focus:ring-2 focus:ring-blue-400';
+  return active
+    ? `${base} border-blue-600 dark:border-wiki-border-active text-gray-900 dark:text-wiki-heading`
+    : `${base} border-transparent text-gray-500 dark:text-wiki-text-muted hover:text-gray-900 dark:hover:text-wiki-heading hover:border-gray-300 dark:hover:border-wiki-border`;
+}
+
+function repoMcpPanelClass(active) {
+  return active ? '' : 'hidden';
+}
+
+function repoMcpCopyButton(copyKey) {
+  const label = escHtml(t('action.copy'));
+  return `<button type="button" data-mcp-copy="${copyKey}" title="${label}" aria-label="${label}"
+                  class="absolute top-1.5 right-1.5 p-1.5 rounded border border-gray-200 dark:border-wiki-border
+                         bg-white/70 dark:bg-wiki-bg/60 text-gray-500 dark:text-wiki-text-muted
+                         hover:text-gray-900 dark:hover:text-wiki-text hover:bg-white dark:hover:bg-wiki-surface
+                         focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">${COPY_ICON_SVG}</button>`;
+}
+
+function renderRepoMcpComponent(root, options) {
+  if (!root) return;
+  const repo = options.getRepo();
+  if (!repo) {
+    root.innerHTML = '';
+    delete root.dataset.mcpRendered;
+    return;
+  }
+  const prefix = options.prefix;
+  const origin = window.location.origin;
+  const repoName = sanitizeRepoName(repo);
+  const endpointUrl = origin + '/mcp-repo/' + repoName;
+  const cmd = 'claude mcp add --scope project --transport http codebase-retrieval ' + endpointUrl;
+  const tabHtml = REPO_MCP_TABS.map((tab, i) => {
+    const tabId = repoMcpId(prefix, 'tab', tab.key);
+    const panelId = repoMcpId(prefix, 'panel', tab.key);
+    return `<button type="button" role="tab" id="${tabId}" aria-selected="${i === 0 ? 'true' : 'false'}"
+                    aria-controls="${panelId}" data-mcp-tab="${tab.key}"
+                    class="${repoMcpTabClass(i === 0)}">${escHtml(t(tab.labelKey))}</button>`;
+  }).join('');
+
+  root.dataset.mcpRendered = '1';
+  root.innerHTML = `
+    <div role="tablist" class="flex border-b border-gray-200 dark:border-wiki-border mb-6">
+      ${tabHtml}
+    </div>
+
+    <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'claude')}" data-mcp-panel="claude" aria-labelledby="${repoMcpId(prefix, 'tab', 'claude')}" class="${repoMcpPanelClass(true)}">
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${escHtml(t('repo.claudeCmdDesc'))}</p>
+      <div class="relative">
+        <code data-mcp-content="claude-cmd"
+              class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                     bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-all"></code>
+        ${repoMcpCopyButton('claude-cmd')}
+      </div>
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mt-3">${escHtml(t('repo.claudeAcceptDesc'))}</p>
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">${t('mcp.claudeMdDesc')}</p>
+      <div class="relative">
+        <pre data-mcp-content="claude-md"
+             class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                    bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+        ${repoMcpCopyButton('claude-md')}
+      </div>
+    </div>
+
+    <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'codex')}" data-mcp-panel="codex" aria-labelledby="${repoMcpId(prefix, 'tab', 'codex')}" class="${repoMcpPanelClass(false)}">
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${t('repo.codexConfigDesc')}</p>
+      <div class="relative">
+        <pre data-mcp-content="codex-config"
+             class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                    bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+        ${repoMcpCopyButton('codex-config')}
+      </div>
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">${t('mcp.agentsMdDesc')}</p>
+      <div class="relative">
+        <pre data-mcp-content="agents-md"
+             class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                    bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+        ${repoMcpCopyButton('agents-md')}
+      </div>
+    </div>
+
+    <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'opencode')}" data-mcp-panel="opencode" aria-labelledby="${repoMcpId(prefix, 'tab', 'opencode')}" class="${repoMcpPanelClass(false)}">
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${t('repo.opencodeConfigDesc')}</p>
+      <div class="relative">
+        <pre data-mcp-content="opencode-config"
+             class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                    bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+        ${repoMcpCopyButton('opencode-config')}
+      </div>
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mt-6 mb-3">${t('mcp.opencodeAgentsMdDesc')}</p>
+      <div class="relative">
+        <pre data-mcp-content="opencode-agents-md"
+             class="font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                    bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all whitespace-pre-wrap break-words block m-0"></pre>
+        ${repoMcpCopyButton('opencode-agents-md')}
+      </div>
+    </div>
+
+    <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'endpoint')}" data-mcp-panel="endpoint" aria-labelledby="${repoMcpId(prefix, 'tab', 'endpoint')}" class="${repoMcpPanelClass(false)}">
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${escHtml(t('mcp.endpointDesc'))}</p>
+      <div class="relative">
+        <code data-mcp-content="endpoint"
+              class="block font-mono text-sm px-3 py-2 pr-12 rounded border border-gray-200 dark:border-wiki-border
+                     bg-gray-50 dark:bg-wiki-surface text-gray-800 dark:text-wiki-link select-all break-all"></code>
+        ${repoMcpCopyButton('endpoint')}
+      </div>
+    </div>
+
+    <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'test')}" data-mcp-panel="test" aria-labelledby="${repoMcpId(prefix, 'tab', 'test')}" class="${repoMcpPanelClass(false)}">
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${escHtml(t('mcp.testDesc'))}</p>
+      <div class="space-y-3">
+        <div>
+          <label for="${repoMcpId(prefix, 'test', 'tool')}" class="block text-xs text-gray-500 dark:text-wiki-text-muted mb-1">Tool</label>
+          <select id="${repoMcpId(prefix, 'test', 'tool')}" data-mcp-test-tool
+                  class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface rounded px-3 py-2 text-sm
+                         text-gray-900 dark:text-wiki-text focus:outline-none focus:ring-2 focus:ring-blue-400">
+            <option value="codebase-retrieval">codebase-retrieval</option>
+            <option value="file-retrieval">file-retrieval</option>
+          </select>
+        </div>
+        <div data-mcp-test-file-path-group class="hidden">
+          <label for="${repoMcpId(prefix, 'test', 'file-path')}" class="block text-xs text-gray-500 dark:text-wiki-text-muted mb-1">file_path</label>
+          <input id="${repoMcpId(prefix, 'test', 'file-path')}" data-mcp-test-file-path type="text" placeholder="src/main.rs"
+                 class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface rounded px-3 py-2 text-sm
+                        text-gray-900 dark:text-wiki-text placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted
+                        focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />
+        </div>
+        <div>
+          <label for="${repoMcpId(prefix, 'test', 'query')}" class="block text-xs text-gray-500 dark:text-wiki-text-muted mb-1">information_request</label>
+          <input id="${repoMcpId(prefix, 'test', 'query')}" data-mcp-test-query type="text" placeholder="${escHtml(t('mcp.testQueryPlaceholder'))}"
+                 class="w-full border border-gray-200 dark:border-wiki-border bg-white dark:bg-wiki-surface rounded px-3 py-2 text-sm
+                        text-gray-900 dark:text-wiki-text placeholder:text-gray-400 dark:placeholder:text-wiki-text-muted
+                        focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 dark:focus:border-wiki-border-active" />
+        </div>
+      </div>
+      <button type="button" data-mcp-action="run-test"
+              class="mt-3 px-4 py-2 bg-blue-600 dark:bg-wiki-border-active/20 dark:border dark:border-wiki-border-active text-white dark:text-wiki-link text-sm rounded
+                     hover:bg-blue-700 dark:hover:bg-wiki-border-active/30 focus:outline-none focus:ring-2 focus:ring-blue-400
+                     disabled:opacity-50 disabled:cursor-not-allowed">
+        ${escHtml(t('action.run'))}
+      </button>
+      <div data-mcp-test-error class="hidden mt-3 text-sm text-red-600 dark:text-red-400"></div>
+      <pre data-mcp-test-output
+           class="hidden mt-4 text-xs p-3 border border-gray-200 dark:border-wiki-border rounded bg-white dark:bg-wiki-surface
+                  text-gray-800 dark:text-wiki-text font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap max-h-[600px] overflow-y-auto"></pre>
+    </div>
+  `;
+
+  const setContent = (key, value) => {
+    const el = root.querySelector(`[data-mcp-content="${key}"]`);
+    if (el) el.textContent = value;
+  };
+  setContent('endpoint', endpointUrl);
+  setContent('claude-cmd', cmd);
+  setContent('codex-config', buildCodexConfigSnippet(endpointUrl));
+  setContent('opencode-config', buildOpencodeConfigSnippet(endpointUrl));
+  setContent('agents-md', buildAgentsMdSnippet());
+  setContent('opencode-agents-md', buildAgentsMdSnippet());
+  setContent('claude-md', buildClaudeMdSnippet());
+
+  bindRepoMcpComponent(root, options);
+  activateRepoMcpTab(root, 0);
+}
+
+function bindRepoMcpComponent(root, options) {
+  root.querySelectorAll('[data-mcp-tab]').forEach((btn) => {
+    const idx = REPO_MCP_TABS.findIndex((t) => t.key === btn.dataset.mcpTab);
+    btn.addEventListener('click', () => activateRepoMcpTab(root, idx));
+  });
+
+  root.querySelectorAll('[data-mcp-copy]').forEach((btn) => {
+    makeCopyBtn(btn, () => {
+      const el = root.querySelector(`[data-mcp-content="${btn.dataset.mcpCopy}"]`);
+      return el ? el.textContent : '';
+    });
+  });
+
+  const toolSelect = root.querySelector('[data-mcp-test-tool]');
+  const filePathGroup = root.querySelector('[data-mcp-test-file-path-group]');
+  if (toolSelect && filePathGroup) {
+    toolSelect.addEventListener('change', () => {
+      filePathGroup.classList.toggle('hidden', toolSelect.value !== 'file-retrieval');
+    });
+  }
+
+  const runBtn = root.querySelector('[data-mcp-action="run-test"]');
+  if (runBtn) {
+    runBtn.addEventListener('click', () => runRepoMcpTest(root, options.getRepo));
+  }
+}
+
+function activateRepoMcpTab(root, idx) {
   REPO_MCP_TABS.forEach((t, i) => {
-    const btn = document.getElementById(t.btn);
-    const panel = document.getElementById(t.panel);
+    const btn = root.querySelector(`[data-mcp-tab="${t.key}"]`);
+    const panel = root.querySelector(`[data-mcp-panel="${t.key}"]`);
+    if (!btn || !panel) return;
     if (i === idx) {
       btn.setAttribute('aria-selected', 'true');
-      btn.classList.remove('border-transparent', 'text-gray-500', 'dark:text-wiki-text-muted');
-      btn.classList.add('border-blue-600', 'dark:border-wiki-border-active', 'text-gray-900', 'dark:text-wiki-heading');
+      btn.className = repoMcpTabClass(true);
       panel.classList.remove('hidden');
     } else {
       btn.setAttribute('aria-selected', 'false');
-      btn.classList.add('border-transparent', 'text-gray-500', 'dark:text-wiki-text-muted');
-      btn.classList.remove('border-blue-600', 'dark:border-wiki-border-active', 'text-gray-900', 'dark:text-wiki-heading');
+      btn.className = repoMcpTabClass(false);
       panel.classList.add('hidden');
     }
   });
 }
 
-REPO_MCP_TABS.forEach((t, i) => {
-  document.getElementById(t.btn).addEventListener('click', () => activateRepoMcpTab(i));
-});
-
-// Toggle file_path field for repo MCP test
-document.getElementById('repo-mcp-test-tool-select').addEventListener('change', (e) => {
-  document.getElementById('repo-mcp-test-file-path-group').classList.toggle('hidden', e.target.value !== 'file-retrieval');
-});
-
-async function runRepoMcpTest() {
-  const btn = document.getElementById('btn-repo-mcp-run');
-  const errorEl = document.getElementById('repo-mcp-test-error');
-  const outputEl = document.getElementById('repo-mcp-test-output');
-  const query = document.getElementById('repo-mcp-test-query').value.trim();
-  const tool = document.getElementById('repo-mcp-test-tool-select').value;
+async function runRepoMcpTest(root, getRepo) {
+  const repo = getRepo();
+  if (!repo) return;
+  const btn = root.querySelector('[data-mcp-action="run-test"]');
+  const errorEl = root.querySelector('[data-mcp-test-error]');
+  const outputEl = root.querySelector('[data-mcp-test-output]');
+  const query = root.querySelector('[data-mcp-test-query]').value.trim();
+  const tool = root.querySelector('[data-mcp-test-tool]').value;
   if (!query) return;
 
   btn.disabled = true;
@@ -3764,9 +3823,9 @@ async function runRepoMcpTest() {
   outputEl.classList.add('hidden');
 
   try {
-    const body = { information_request: query, workspace_full_path: currentSearchRepo };
+    const body = { information_request: query, workspace_full_path: repo };
     if (tool === 'file-retrieval') {
-      body.file_path = document.getElementById('repo-mcp-test-file-path').value.trim();
+      body.file_path = root.querySelector('[data-mcp-test-file-path]').value.trim();
       if (!body.file_path) { btn.disabled = false; btn.textContent = t('action.run'); return; }
     }
     const endpoint = tool === 'file-retrieval' ? '/api/mcp-tool/file-retrieval' : '/api/mcp-tool';
@@ -3787,15 +3846,11 @@ async function runRepoMcpTest() {
     btn.textContent = t('action.run');
   }
 }
-document.getElementById('btn-repo-mcp-run').addEventListener('click', runRepoMcpTest);
 
-makeCopyBtn('btn-copy-repo-endpoint',  () => document.getElementById('repo-mcp-endpoint-url').textContent);
-makeCopyBtn('btn-copy-repo-claude',    () => document.getElementById('repo-claude-cmd').textContent);
-makeCopyBtn('btn-copy-repo-codex-config', () => document.getElementById('repo-codex-config').textContent);
-makeCopyBtn('btn-copy-repo-opencode-config', () => document.getElementById('repo-opencode-config').textContent);
-makeCopyBtn('btn-copy-repo-agents-md', () => document.getElementById('repo-agents-md').textContent);
-makeCopyBtn('btn-copy-repo-opencode-agents-md', () => document.getElementById('repo-opencode-agents-md').textContent);
-makeCopyBtn('btn-copy-repo-claude-md', () => document.getElementById('repo-claude-md').textContent);
+document.getElementById('btn-close-repo-mcp-modal').addEventListener('click', closeRepoMcpModal);
+document.getElementById('modal-repo-mcp').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeRepoMcpModal();
+});
 
 async function runSearch() {
   const input = document.getElementById('input-search');
@@ -5722,6 +5777,10 @@ document.addEventListener('keydown', (e) => {
   // The models manager sits above the chat dialog — close it first if open.
   if (!document.getElementById('modal-chat-models').classList.contains('hidden')) {
     closeChatModelsManager();
+    return;
+  }
+  if (!document.getElementById('modal-repo-mcp').classList.contains('hidden')) {
+    closeRepoMcpModal();
     return;
   }
   if (!document.getElementById('modal-chat').classList.contains('hidden')) {
