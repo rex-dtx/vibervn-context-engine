@@ -10,6 +10,7 @@ pub mod indexing;
 pub mod llm;
 pub mod mcp;
 pub mod mcp_session_store;
+pub mod mcp_setup;
 pub mod parsing;
 pub mod prompts;
 pub mod query;

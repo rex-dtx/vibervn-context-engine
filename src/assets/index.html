@@ -1394,6 +1394,17 @@ const STR = {
   'mcp.testDesc':      { en: `Send a request directly to the MCP tool and see the raw output.`, vi: `Gửi request trực tiếp đến MCP tool và xem output thô.`, zh: `直接向 MCP 工具发送请求并查看原始输出。` },
   'mcp.testQueryPlaceholder': { en: `e.g. Where is authentication handled?`, vi: `vd. Xác thực được xử lý ở đâu?`, zh: `例如：身份验证在哪里处理？` },
   'mcp.running':       { en: `Running…`, vi: `Đang chạy…`, zh: `运行中…` },
+  'mcp.autoSetup':     { en: `Auto Setup`, vi: `Auto Setup`, zh: `自动设置` },
+  'mcp.autoSetupDesc': { en: `Write the MCP config and prompt files into this project automatically, instead of copying the snippets by hand.`,
+                         vi: `Tự động ghi file MCP config và prompt vào project này, thay vì copy snippet bằng tay.`,
+                         zh: `自动将 MCP config 和 prompt 文件写入此项目，无需手动复制代码片段。` },
+  'mcp.settingUp':     { en: `Setting up…`, vi: `Đang thiết lập…`, zh: `设置中…` },
+  'mcp.setupDone':     { en: `Auto setup complete`, vi: `Auto setup hoàn tất`, zh: `自动设置完成` },
+  'mcp.setupPartial':  { en: `Auto setup finished with errors`, vi: `Auto setup xong nhưng có lỗi`, zh: `自动设置完成但有错误` },
+  'mcp.fileCreated':   { en: `created`, vi: `đã tạo`, zh: `已创建` },
+  'mcp.fileUpdated':   { en: `updated`, vi: `đã cập nhật`, zh: `已更新` },
+  'mcp.fileUnchanged': { en: `unchanged`, vi: `không đổi`, zh: `未更改` },
+  'mcp.fileError':     { en: `error`, vi: `lỗi`, zh: `错误` },
 
   // Repo detail — explorer & graph
   'repo.explorer':     { en: `Index Explorer`, vi: `Index Explorer`, zh: `索引浏览器` },
@@ -3618,6 +3629,23 @@ function repoMcpCopyButton(copyKey) {
                          focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors">${COPY_ICON_SVG}</button>`;
 }
 
+// Auto Setup block shown atop each tool panel (claude/codex/opencode). The
+// button posts to /api/repos/:id/mcp-setup with the given target; the status
+// line below it lists each file the backend created/updated/skipped.
+function repoMcpAutoSetupBlock(target) {
+  return `
+    <div class="mb-6 pb-6 border-b border-gray-200 dark:border-wiki-border">
+      <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${escHtml(t('mcp.autoSetupDesc'))}</p>
+      <button type="button" data-mcp-action="auto-setup" data-mcp-target="${target}"
+              class="px-4 py-2 bg-blue-600 dark:bg-wiki-border-active/20 dark:border dark:border-wiki-border-active text-white dark:text-wiki-link text-sm rounded
+                     hover:bg-blue-700 dark:hover:bg-wiki-border-active/30 focus:outline-none focus:ring-2 focus:ring-blue-400
+                     disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+        ${escHtml(t('mcp.autoSetup'))}
+      </button>
+      <div data-mcp-setup-status="${target}" class="hidden mt-3 text-sm"></div>
+    </div>`;
+}
+
 function renderRepoMcpComponent(root, options) {
   if (!root) return;
   const repo = options.getRepo();
@@ -3646,6 +3674,7 @@ function renderRepoMcpComponent(root, options) {
     </div>
 
     <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'claude')}" data-mcp-panel="claude" aria-labelledby="${repoMcpId(prefix, 'tab', 'claude')}" class="${repoMcpPanelClass(true)}">
+      ${repoMcpAutoSetupBlock('claude')}
       <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${escHtml(t('repo.claudeCmdDesc'))}</p>
       <div class="relative">
         <code data-mcp-content="claude-cmd"
@@ -3664,6 +3693,7 @@ function renderRepoMcpComponent(root, options) {
     </div>
 
     <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'codex')}" data-mcp-panel="codex" aria-labelledby="${repoMcpId(prefix, 'tab', 'codex')}" class="${repoMcpPanelClass(false)}">
+      ${repoMcpAutoSetupBlock('codex')}
       <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${t('repo.codexConfigDesc')}</p>
       <div class="relative">
         <pre data-mcp-content="codex-config"
@@ -3681,6 +3711,7 @@ function renderRepoMcpComponent(root, options) {
     </div>
 
     <div role="tabpanel" id="${repoMcpId(prefix, 'panel', 'opencode')}" data-mcp-panel="opencode" aria-labelledby="${repoMcpId(prefix, 'tab', 'opencode')}" class="${repoMcpPanelClass(false)}">
+      ${repoMcpAutoSetupBlock('opencode')}
       <p class="text-sm text-gray-600 dark:text-wiki-text-muted mb-3">${t('repo.opencodeConfigDesc')}</p>
       <div class="relative">
         <pre data-mcp-content="opencode-config"
@@ -3787,6 +3818,67 @@ function bindRepoMcpComponent(root, options) {
   const runBtn = root.querySelector('[data-mcp-action="run-test"]');
   if (runBtn) {
     runBtn.addEventListener('click', () => runRepoMcpTest(root, options.getRepo));
+  }
+
+  root.querySelectorAll('[data-mcp-action="auto-setup"]').forEach((btn) => {
+    btn.addEventListener('click', () => runRepoMcpAutoSetup(root, options.getRepo, btn.dataset.mcpTarget));
+  });
+}
+
+// Map a backend file status to {label-key, css-class} for the status list.
+const MCP_SETUP_STATUS_STYLE = {
+  created:   { key: 'mcp.fileCreated',   cls: 'text-green-600 dark:text-green-400' },
+  updated:   { key: 'mcp.fileUpdated',   cls: 'text-blue-600 dark:text-wiki-link' },
+  unchanged: { key: 'mcp.fileUnchanged', cls: 'text-gray-500 dark:text-wiki-text-muted' },
+  error:     { key: 'mcp.fileError',     cls: 'text-red-600 dark:text-red-400' },
+};
+
+async function runRepoMcpAutoSetup(root, getRepo, target) {
+  const repo = getRepo();
+  if (!repo) return;
+  const btn = root.querySelector(`[data-mcp-action="auto-setup"][data-mcp-target="${target}"]`);
+  const statusEl = root.querySelector(`[data-mcp-setup-status="${target}"]`);
+  if (!btn || !statusEl) return;
+
+  // Build the endpoint URL from the browser origin — that carries the live
+  // listen port (the server's port isn't in AppState). Backend re-validates it.
+  const endpointUrl = window.location.origin + '/mcp-repo/' + sanitizeRepoName(repo);
+
+  const origLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t('mcp.settingUp');
+  statusEl.classList.add('hidden');
+  statusEl.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/repos/' + encodeRepoId(repo) + '/mcp-setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, endpoint_url: endpointUrl }),
+    });
+    const data = await res.json();
+    if (!res.ok && !Array.isArray(data.actions)) {
+      throw new Error(data.error || t('err.requestFail', { status: res.status }));
+    }
+    const actions = data.actions || [];
+    const anyError = actions.some((a) => a.status === 'error');
+
+    statusEl.innerHTML = actions.map((a) => {
+      const style = MCP_SETUP_STATUS_STYLE[a.status] || MCP_SETUP_STATUS_STYLE.unchanged;
+      const detail = a.detail ? ` — ${escHtml(a.detail)}` : '';
+      return `<div class="${style.cls}">
+                <span class="font-mono">${escHtml(a.file)}</span>
+                <span class="text-xs">(${escHtml(t(style.key))})</span>${detail}
+              </div>`;
+    }).join('');
+    statusEl.classList.remove('hidden');
+    showToast(anyError ? t('mcp.setupPartial') : t('mcp.setupDone'));
+  } catch (err) {
+    statusEl.innerHTML = `<div class="text-red-600 dark:text-red-400">${escHtml(t('err.network', { msg: err.message }))}</div>`;
+    statusEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
   }
 }
 

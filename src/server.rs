@@ -231,6 +231,7 @@ pub fn build_router(
         .route("/api/repos/:repo_id/graph", get(get_repo_graph))
         .route("/api/repos/:repo_id/chunks", get(get_repo_chunks))
         .route("/api/repos/:repo_id/index-events", get(get_index_events))
+        .route("/api/repos/:repo_id/mcp-setup", post(post_mcp_setup))
         .route("/api/repos/:repo_id/chat", post(post_repo_chat))
         .route(
             "/api/repos/:repo_id/chat/:conversation_id",
@@ -1309,8 +1310,99 @@ async fn post_file_retrieval(
     Json(json!({ "result": result })).into_response()
 }
 
-// ─── Per-repo MCP endpoint ──────────────────────────────────────────────
+// ─── MCP auto-setup ────────────────────────────────────────────────────────
 
+#[derive(Deserialize)]
+struct McpSetupRequest {
+    /// "claude" | "codex" | "opencode".
+    target: String,
+    /// Browser-built MCP URL: `<origin>/mcp-repo/<sanitized>`. The origin is how
+    /// the live listen port reaches us (it lives only in `main.rs`, not state).
+    endpoint_url: String,
+}
+
+/// POST /api/repos/:repo_id/mcp-setup — write a tool's MCP config + prompt
+/// files directly into the repo on disk.
+///
+/// Validates: (1) repo_id decodes and is present in `settings.repos`; (2) the
+/// target is a known tool; (3) `endpoint_url` is the repo's own MCP endpoint
+/// (path `/mcp-repo/<sanitize_repo_name(repo)>`) so a caller can't write an
+/// arbitrary URL into the user's config.
+async fn post_mcp_setup(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+    Json(req): Json<McpSetupRequest>,
+) -> Response {
+    let repo = match decode_repo_id(&repo_id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+
+    let target = match crate::mcp_setup::Target::parse(&req.target) {
+        Some(t) => t,
+        None => {
+            let body = json!({ "error": format!("unknown target: {}", req.target) });
+            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        }
+    };
+
+    // Repo must be a configured repo — never write into an arbitrary path.
+    {
+        let settings = state.settings.read().await;
+        if !settings.repos.contains(&repo) {
+            let body = json!({ "error": "repo not found" });
+            return (StatusCode::NOT_FOUND, Json(body)).into_response();
+        }
+    }
+
+    // The URL must be THIS repo's own MCP endpoint. We accept any scheme/host
+    // (reverse proxies are valid) but the path must end with the repo's
+    // sanitized-name route, so a caller can't smuggle a foreign URL into the
+    // user's config file.
+    let expected_suffix = format!("/mcp-repo/{}", store::sanitize_repo_name(&repo));
+    let url_path = req
+        .endpoint_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(&req.endpoint_url)
+        .trim_end_matches('/');
+    if !url_path.ends_with(&expected_suffix) {
+        let body = json!({
+            "error": "endpoint_url does not match this repo's MCP endpoint",
+        });
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    }
+
+    // File IO is blocking — run off the async runtime.
+    let repo_root = PathBuf::from(&repo);
+    let endpoint_url = req.endpoint_url.clone();
+    let actions = match tokio::task::spawn_blocking(move || {
+        crate::mcp_setup::run_setup(&repo_root, target, &endpoint_url)
+    })
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            let body = json!({ "error": format!("setup task failed: {e}") });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+        }
+    };
+
+    let any_error = actions
+        .iter()
+        .any(|a| a.status == crate::mcp_setup::FileStatus::Error);
+    let body = json!({ "actions": actions.iter().map(|a| a.to_json()).collect::<Vec<_>>() });
+    // 207 (Multi-Status) when some files errored but others succeeded — the UI
+    // renders per-file status either way.
+    let code = if any_error {
+        StatusCode::MULTI_STATUS
+    } else {
+        StatusCode::OK
+    };
+    (code, Json(body)).into_response()
+}
+
+// ─── Per-repo MCP endpoint ──────────────────────────────────────────────
 /// ANY /mcp-repo/:repo_name — per-repo MCP endpoint (no workspace_full_path needed).
 /// `repo_name` is the sanitized repo name (e.g. `D__projects_Python_foo`).
 async fn handle_repo_mcp(
