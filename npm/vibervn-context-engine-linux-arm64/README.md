@@ -1,8 +1,8 @@
 # vibervn-context-engine
 
-**English** · [Tiếng Việt](README-vi.md) · [中文](README-zh.md)
+**English** · [Tiếng Việt](https://github.com/nullmastermind/vibervn-context-engine/blob/master/README-vi.md) · [中文](https://github.com/nullmastermind/vibervn-context-engine/blob/master/README-zh.md)
 
-![Web UI](screenshot.png)
+![Web UI](https://raw.githubusercontent.com/nullmastermind/vibervn-context-engine/master/screenshot.png)
 
 ## Install & Run
 
