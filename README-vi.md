@@ -118,3 +118,13 @@ flowchart TD
     Q5 --> Q6[Format: path#Lstart-end + dòng đánh số]
     Q6 --> Result([Kết quả])
 ```
+
+## Đóng góp
+
+Chúng tôi hoan nghênh các **feature request được mô tả bằng văn bản** — hãy mở
+một issue mô tả hành vi bạn mong muốn, và chúng tôi sẽ cân nhắc đưa vào roadmap.
+
+Hiện tại chúng tôi **chưa nhận các pull request có chứa code**, **ngoại trừ duy
+nhất bug fix**. Nếu bạn muốn đề xuất một tính năng mới, vui lòng tạo một
+feature-request issue thay vì gửi PR code. Các PR bug fix (kèm mô tả rõ ràng về
+bug và cách sửa) thì luôn được hoan nghênh.

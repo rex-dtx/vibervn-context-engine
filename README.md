@@ -120,3 +120,13 @@ flowchart TD
     Q6 --> Q7[Format: path#Lstart-end + caller/callee names + numbered lines]
     Q7 --> Result([Results])
 ```
+
+## Contributing
+
+We welcome **feature requests described in prose** — open an issue describing the
+behavior you'd like to see, and we'll consider it for the roadmap.
+
+At this time we are **not accepting pull requests that contain code**, with the
+**sole exception of bug fixes**. If you'd like to propose a new feature, please
+file a feature-request issue rather than a code PR. Bug-fix PRs (with a clear
+description of the bug and the fix) are welcome.

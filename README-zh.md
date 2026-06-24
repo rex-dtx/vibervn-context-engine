@@ -113,3 +113,12 @@ flowchart TD
     Q5 --> Q6[格式化: path#Lstart-end + 带行号的源码]
     Q6 --> Result([结果])
 ```
+
+## 贡献
+
+我们欢迎**以文字描述的 feature request** —— 请提交一个 issue 描述你期望的行为，
+我们会考虑将其纳入路线图。
+
+目前我们**不接受包含代码的 pull request**，**唯一的例外是 bug fix**。如果你想
+提议一个新功能，请提交 feature-request issue，而不是代码 PR。bug fix PR（附带
+对 bug 及修复方式的清晰描述）始终欢迎。
