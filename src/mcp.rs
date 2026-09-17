@@ -14,16 +14,21 @@ use surrealdb::engine::local::Db;
 use tokio::sync::RwLock;
 
 use rmcp::{
-    ErrorData, ServerHandler,
+    ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
 };
 
+mod progress;
 pub(crate) mod query_gate;
 pub(crate) mod readiness;
 #[cfg(test)]
 mod tests;
+
+pub use progress::{MCP_PROGRESS_HEARTBEAT, with_progress_heartbeat};
 
 use crate::config::Settings;
 use crate::embedding::voyage::VoyageClient;
@@ -354,6 +359,7 @@ impl McpHandler {
     async fn codebase_retrieval(
         &self,
         Parameters(args): Parameters<CodebaseRetrievalArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         // Take an owned snapshot of settings — the guard is dropped before the .await below.
         let settings = self.settings.read().await.clone();
@@ -364,14 +370,20 @@ impl McpHandler {
             args.filter_lang.as_deref(),
             args.filter_path.as_deref(),
         );
-        let text = run_codebase_retrieval(
-            &self.home_dir,
-            &self.data_dir,
-            &self.index_engine,
-            &self.repo_dbs,
-            &settings,
-            &augmented_query,
-            &args.workspace_full_path,
+        let text = with_progress_heartbeat(
+            ctx.peer,
+            &ctx.meta,
+            ctx.ct,
+            MCP_PROGRESS_HEARTBEAT,
+            run_codebase_retrieval(
+                &self.home_dir,
+                &self.data_dir,
+                &self.index_engine,
+                &self.repo_dbs,
+                &settings,
+                &augmented_query,
+                &args.workspace_full_path,
+            ),
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -382,16 +394,23 @@ impl McpHandler {
     async fn file_retrieval(
         &self,
         Parameters(args): Parameters<FileRetrievalArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let settings = self.settings.read().await.clone();
-        let text = run_file_retrieval(
-            &self.data_dir,
-            &self.repo_dbs,
-            &settings,
-            &args.workspace_full_path,
-            &args.file_path,
-            &args.information_request,
-            args.top_k.unwrap_or(5),
+        let text = with_progress_heartbeat(
+            ctx.peer,
+            &ctx.meta,
+            ctx.ct,
+            MCP_PROGRESS_HEARTBEAT,
+            run_file_retrieval(
+                &self.data_dir,
+                &self.repo_dbs,
+                &settings,
+                &args.workspace_full_path,
+                &args.file_path,
+                &args.information_request,
+                args.top_k.unwrap_or(5),
+            ),
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -473,16 +492,23 @@ impl RepoMcpHandler {
     async fn codebase_retrieval(
         &self,
         Parameters(args): Parameters<RepoCodebaseRetrievalArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let settings = self.settings.read().await.clone();
-        let text = run_codebase_retrieval(
-            &self.home_dir,
-            &self.data_dir,
-            &self.index_engine,
-            &self.repo_dbs,
-            &settings,
-            &args.information_request,
-            &self.repo_path,
+        let text = with_progress_heartbeat(
+            ctx.peer,
+            &ctx.meta,
+            ctx.ct,
+            MCP_PROGRESS_HEARTBEAT,
+            run_codebase_retrieval(
+                &self.home_dir,
+                &self.data_dir,
+                &self.index_engine,
+                &self.repo_dbs,
+                &settings,
+                &args.information_request,
+                &self.repo_path,
+            ),
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -493,16 +519,23 @@ impl RepoMcpHandler {
     async fn file_retrieval(
         &self,
         Parameters(args): Parameters<RepoFileRetrievalArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let settings = self.settings.read().await.clone();
-        let text = run_file_retrieval(
-            &self.data_dir,
-            &self.repo_dbs,
-            &settings,
-            &self.repo_path,
-            &args.file_path,
-            &args.information_request,
-            args.top_k.unwrap_or(5),
+        let text = with_progress_heartbeat(
+            ctx.peer,
+            &ctx.meta,
+            ctx.ct,
+            MCP_PROGRESS_HEARTBEAT,
+            run_file_retrieval(
+                &self.data_dir,
+                &self.repo_dbs,
+                &settings,
+                &self.repo_path,
+                &args.file_path,
+                &args.information_request,
+                args.top_k.unwrap_or(5),
+            ),
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
